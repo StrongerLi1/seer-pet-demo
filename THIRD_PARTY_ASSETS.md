@@ -1,0 +1,8 @@
+# 第三方资源说明
+
+`frames/idle` 的 16 帧 PNG 从赛尔号官方 1 号精灵战斗 SWF 的内部待机子动画中提取，作为应用首次启动时的内置待机。程序对其他编号也会在本机从对应官方 SWF 自动提取同类资源。
+
+`AppIcon-1024.png` 和 `AppIcon.icns` 使用 300 号精灵官方战斗 SWF 的内部待机动画第 16 帧制作，仅做透明边界裁切、居中和尺寸缩放。
+
+- 官方资源格式：`https://seer.61.com/resource/fightResource/pet/swf/{编号}.swf`
+- 1 号精灵待机子动画：`DefineSprite_15`
