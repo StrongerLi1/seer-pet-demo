@@ -16,8 +16,89 @@ static const CGFloat DefaultIdleFPS = 12.0;
 static const CGFloat MovementFPS = 25.0;
 static const CGFloat MovementSpeed = 60.0;
 static const CGFloat RandomAttackInterval = 8.0;
+static const CGFloat MaxRasterSide = IdleDisplaySize * 2.0;
+static const CGFloat MaxActionRasterSide = 4096.0;
 static void SetError(NSError **error, NSString *message) {
     if (error) *error = [NSError errorWithDomain:@"SeerPet" code:1 userInfo:@{NSLocalizedDescriptionKey: message}];
+}
+static NSSize SourcePixelSizeAtURL(NSURL *url) {
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+    if (!source) return NSZeroSize;
+    NSDictionary *properties = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(source, 0, NULL));
+    CFRelease(source);
+    return NSMakeSize([properties[(NSString *)kCGImagePropertyPixelWidth] doubleValue],
+                      [properties[(NSString *)kCGImagePropertyPixelHeight] doubleValue]);
+}
+static NSRect AppKitRectFromTopOriginRect(NSRect rect, CGFloat imageHeight) {
+    return NSMakeRect(rect.origin.x, imageHeight - NSMaxY(rect), rect.size.width, rect.size.height);
+}
+static BOOL DownsamplePNGAtURL(NSURL *url, CGFloat scale) {
+    if (scale >= 1.0) return YES;
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+    if (!source) return NO;
+    NSSize size = SourcePixelSizeAtURL(url);
+    CGImageRef image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)@{
+        (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+        (NSString *)kCGImageSourceThumbnailMaxPixelSize: @(ceil(MAX(size.width, size.height) * scale)),
+        (NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES
+    });
+    CFRelease(source);
+    if (!image) return NO;
+    NSMutableData *data = [NSMutableData data];
+    CGImageDestinationRef destination = CGImageDestinationCreateWithData(
+        (__bridge CFMutableDataRef)data, CFSTR("public.png"), 1, NULL);
+    if (destination) {
+        CGImageDestinationAddImage(destination, image, NULL);
+        BOOL finalized = CGImageDestinationFinalize(destination);
+        CFRelease(destination);
+        CGImageRelease(image);
+        return finalized && [data writeToURL:url options:NSDataWritingAtomic error:nil];
+    }
+    CGImageRelease(image);
+    return NO;
+}
+static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNumber *> *baseScales,
+                                 void (^progress)(double)) {
+    NSArray<NSURL *> *directories = [NSFileManager.defaultManager contentsOfDirectoryAtURL:framesURL
+        includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
+    NSMutableDictionary<NSString *, NSNumber *> *scales = [NSMutableDictionary dictionary];
+    NSMutableArray<NSDictionary *> *work = [NSMutableArray array];
+    for (NSURL *directory in directories) {
+        NSArray<NSURL *> *pngs = [[NSFileManager.defaultManager contentsOfDirectoryAtURL:directory
+            includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles error:nil]
+            filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSURL *url, NSDictionary *_) {
+                return [url.pathExtension.lowercaseString isEqualToString:@"png"];
+            }]];
+        if (pngs.count == 0) continue;
+        CGFloat maxSide = 0;
+        for (NSURL *url in pngs) {
+            NSSize size = SourcePixelSizeAtURL(url);
+            maxSide = MAX(maxSide, MAX(size.width, size.height));
+        }
+        CGFloat targetMaxSide = [Actions() containsObject:directory.lastPathComponent] ?
+            MaxActionRasterSide : MaxRasterSide;
+        CGFloat scale = maxSide > targetMaxSide ? targetMaxSide / maxSide : 1.0;
+        scales[directory.lastPathComponent] =
+            @([baseScales[directory.lastPathComponent] ?: @1.0 doubleValue] * scale);
+        for (NSURL *url in pngs) [work addObject:@{@"url": url, @"scale": @(scale)}];
+    }
+    NSOperationQueue *queue = [NSOperationQueue new];
+    queue.maxConcurrentOperationCount = MIN(6, MAX(2, NSProcessInfo.processInfo.activeProcessorCount / 2));
+    __block BOOL success = YES;
+    __block NSUInteger completed = 0;
+    NSLock *lock = [NSLock new];
+    for (NSDictionary *item in work) [queue addOperationWithBlock:^{
+        BOOL converted = DownsamplePNGAtURL(item[@"url"], [item[@"scale"] doubleValue]);
+        [lock lock];
+        if (!converted) success = NO;
+        completed++;
+        double fraction = work.count ? (double)completed / work.count : 1.0;
+        [lock unlock];
+        if (progress) progress(fraction);
+    }];
+    [queue waitUntilAllOperationsAreFinished];
+    return success && [scales writeToURL:[framesURL URLByAppendingPathComponent:@".raster-scales.plist"]
+                              atomically:YES];
 }
 
 @interface PetView : NSView <NSMenuDelegate>
@@ -28,15 +109,22 @@ static void SetError(NSError **error, NSString *message) {
 @property(nonatomic, strong) NSArray<NSImage *> *currentFrames;
 @property(nonatomic, strong) NSImage *currentImage;
 @property(nonatomic, strong) NSImage *idleImage;
+@property(nonatomic, strong) NSDictionary<NSString *, NSArray<NSURL *> *> *actionURLs;
+@property(nonatomic, strong) NSDictionary<NSString *, NSValue *> *actionCropBounds;
+@property(nonatomic, strong) NSDictionary<NSString *, NSNumber *> *rasterScales;
+@property(nonatomic, strong) NSDictionary<NSString *, NSNumber *> *sourceRasterScales;
+@property(nonatomic) NSRect currentSourceRect;
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, strong) NSTimer *movementTimer;
 @property(nonatomic, strong) NSTimer *randomAttackTimer;
 @property(nonatomic, strong) NSDictionary<NSString *, NSValue *> *actionAnchors;
+@property(nonatomic, strong) NSDictionary<NSString *, NSValue *> *frameBodySizes;
 @property(nonatomic, copy) NSString *petID;
 @property(nonatomic, copy) NSString *currentAction;
 @property(nonatomic) CGFloat displayScale;
 @property(nonatomic) CGFloat currentScale;
 @property(nonatomic) CGFloat idleFPS;
+@property(nonatomic) CGFloat idleRasterScale;
 @property(nonatomic) CGFloat walkScale;
 @property(nonatomic) CGFloat sizeMultiplier;
 @property(nonatomic) CGFloat movementDirection;
@@ -63,26 +151,41 @@ static void SetError(NSError **error, NSString *message) {
 - (void)randomAttackTick:(NSTimer *)timer;
 - (NSString *)actionNameForKey:(NSString *)action;
 - (CGFloat)orientedAnchorX:(CGFloat)x imageWidth:(CGFloat)width;
+- (BOOL)writeLayoutMetadataForFramesURL:(NSURL *)framesURL progress:(void (^)(double))progress;
 @end
 
 @implementation PetView
 
-- (NSSize)pixelSizeAtURL:(NSURL *)url {
+- (CGImageRef)newRasterImageAtURL:(NSURL *)url maxSide:(CGFloat)maxSide CF_RETURNS_RETAINED {
     CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
-    if (!source) return NSZeroSize;
-    CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+    if (!source) return nil;
+    NSDictionary *properties = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(source, 0, NULL));
+    CGFloat width = [properties[(NSString *)kCGImagePropertyPixelWidth] doubleValue];
+    CGFloat height = [properties[(NSString *)kCGImagePropertyPixelHeight] doubleValue];
+    CGImageRef image;
+    if (MAX(width, height) > maxSide) {
+        image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)@{
+            (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+            (NSString *)kCGImageSourceThumbnailMaxPixelSize: @(maxSide),
+            (NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES
+        });
+    } else {
+        image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+    }
     CFRelease(source);
+    return image;
+}
+
+- (NSSize)pixelSizeAtURL:(NSURL *)url maxSide:(CGFloat)maxSide {
+    CGImageRef image = [self newRasterImageAtURL:url maxSide:maxSide];
     if (!image) return NSZeroSize;
     NSSize size = NSMakeSize(CGImageGetWidth(image), CGImageGetHeight(image));
     CGImageRelease(image);
     return size;
 }
 
-- (NSValue *)visibleBoundsAtURL:(NSURL *)url {
-    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
-    if (!source) return nil;
-    CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
-    CFRelease(source);
+- (NSValue *)visibleBoundsAtURL:(NSURL *)url maxSide:(CGFloat)maxSide {
+    CGImageRef image = [self newRasterImageAtURL:url maxSide:maxSide];
     if (!image) return nil;
 
     size_t width = CGImageGetWidth(image), height = CGImageGetHeight(image), rowBytes = width * 4;
@@ -111,11 +214,8 @@ static void SetError(NSError **error, NSString *message) {
                                               maxX - minX + 1, maxY - minY + 1)];
 }
 
-- (NSImage *)imageAtURL:(NSURL *)url croppedTo:(NSRect)bounds {
-    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
-    if (!source) return nil;
-    CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
-    CFRelease(source);
+- (NSImage *)imageAtURL:(NSURL *)url croppedTo:(NSRect)bounds maxSide:(CGFloat)maxSide {
+    CGImageRef image = [self newRasterImageAtURL:url maxSide:maxSide];
     if (!image) return nil;
     CGRect imageBounds = CGRectMake(0, 0, CGImageGetWidth(image), CGImageGetHeight(image));
     CGImageRef cropped = CGImageCreateWithImageInRect(image, CGRectIntersection(NSRectToCGRect(bounds), imageBounds));
@@ -123,6 +223,7 @@ static void SetError(NSError **error, NSString *message) {
     if (!cropped) return nil;
     NSImage *result = [[NSImage alloc] initWithCGImage:cropped
                                                  size:NSMakeSize(CGImageGetWidth(cropped), CGImageGetHeight(cropped))];
+    result.cacheMode = NSImageCacheNever;
     CGImageRelease(cropped);
     return result;
 }
@@ -146,14 +247,72 @@ static void SetError(NSError **error, NSString *message) {
     return self;
 }
 
+- (BOOL)writeLayoutMetadataForFramesURL:(NSURL *)framesURL progress:(void (^)(double))progress {
+    NSMutableArray<NSString *> *allActions = Actions().mutableCopy;
+    [allActions addObjectsFromArray:@[@"idle", @"walk-left", @"walk-right"]];
+    NSMutableDictionary *layout = [NSMutableDictionary dictionary];
+    NSUInteger completed = 0;
+    for (NSString *action in allActions) {
+        NSURL *directory = [framesURL URLByAppendingPathComponent:action];
+        NSArray<NSURL *> *urls = [[NSFileManager.defaultManager contentsOfDirectoryAtURL:directory
+            includingPropertiesForKeys:nil options:0 error:nil]
+            filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSURL *url, NSDictionary *_) {
+                return [url.pathExtension.lowercaseString isEqualToString:@"png"];
+            }]];
+        urls = [urls sortedArrayUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
+            return [a.lastPathComponent compare:b.lastPathComponent options:NSNumericSearch];
+        }];
+        if (urls.count == 0) { completed++; continue; }
+        NSSize sourceSize = SourcePixelSizeAtURL(urls.firstObject);
+        CGFloat loadScale = MAX(sourceSize.width, sourceSize.height) > MaxRasterSide ?
+            MaxRasterSide / MAX(sourceSize.width, sourceSize.height) : 1.0;
+        NSMutableArray<NSNumber *> *visible = [NSMutableArray arrayWithCapacity:urls.count];
+        NSRect unionBounds = NSZeroRect, firstBounds = NSZeroRect;
+        BOOL hasVisibleFrame = NO;
+        for (NSUInteger i = 0; i < urls.count; i++) @autoreleasepool {
+            NSValue *bounds = [self visibleBoundsAtURL:urls[i] maxSide:MaxRasterSide];
+            [visible addObject:@(bounds != nil)];
+            if (bounds) {
+                if (!hasVisibleFrame) firstBounds = bounds.rectValue;
+                unionBounds = hasVisibleFrame ? NSUnionRect(unionBounds, bounds.rectValue) : bounds.rectValue;
+                hasVisibleFrame = YES;
+            }
+        }
+        if (!hasVisibleFrame) return NO;
+        NSSize canvasSize = [self pixelSizeAtURL:urls.firstObject maxSide:MaxRasterSide];
+        unionBounds = NSIntersectionRect(NSInsetRect(unionBounds, -CropPadding, -CropPadding),
+                                         NSMakeRect(0, 0, canvasSize.width, canvasSize.height));
+        NSRect sourceCrop = NSMakeRect(unionBounds.origin.x / loadScale, unionBounds.origin.y / loadScale,
+                                      unionBounds.size.width / loadScale, unionBounds.size.height / loadScale);
+        NSRect sourceFirst = NSMakeRect(firstBounds.origin.x / loadScale, firstBounds.origin.y / loadScale,
+                                       firstBounds.size.width / loadScale, firstBounds.size.height / loadScale);
+        NSPoint sourceAnchor = NSMakePoint((NSMidX(firstBounds) - NSMinX(unionBounds)) / loadScale,
+                                           (NSMaxY(firstBounds) - NSMinY(unionBounds)) / loadScale);
+        layout[action] = @{@"crop": NSStringFromRect(sourceCrop), @"first": NSStringFromRect(sourceFirst),
+                           @"anchor": NSStringFromPoint(sourceAnchor), @"visible": visible};
+        completed++;
+        if (progress) progress((double)completed / allActions.count);
+    }
+    return [layout writeToURL:[framesURL URLByAppendingPathComponent:@".layout-v1.plist"] atomically:YES];
+}
+
 - (BOOL)loadFramesFromURL:(NSURL *)resourceURL petID:(NSString *)petID {
     NSMutableDictionary<NSString *, NSArray<NSImage *> *> *loaded = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSValue *> *anchors = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSArray<NSURL *> *> *actionURLs = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSValue *> *actionCropBounds = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSValue *> *bodySizes = [NSMutableDictionary dictionary];
     NSImage *newIdleImage = nil;
     NSMutableArray<NSString *> *allActions = Actions().mutableCopy;
     [allActions addObjectsFromArray:@[@"idle", @"walk-left", @"walk-right"]];
+    NSURL *framesURL = [resourceURL URLByAppendingPathComponent:@"frames"];
+    NSDictionary<NSString *, NSNumber *> *rasterScales =
+        [NSDictionary dictionaryWithContentsOfURL:[framesURL URLByAppendingPathComponent:@".raster-scales.plist"]] ?: @{};
+    NSDictionary *layout = [NSDictionary dictionaryWithContentsOfURL:
+        [framesURL URLByAppendingPathComponent:@".layout-v1.plist"]];
+    NSMutableDictionary<NSString *, NSNumber *> *effectiveRasterScales = rasterScales.mutableCopy;
     for (NSString *action in allActions) {
-        NSURL *directory = [[resourceURL URLByAppendingPathComponent:@"frames"] URLByAppendingPathComponent:action];
+        NSURL *directory = [framesURL URLByAppendingPathComponent:action];
         NSArray<NSURL *> *urls = [[NSFileManager defaultManager] contentsOfDirectoryAtURL:directory
                                                               includingPropertiesForKeys:nil options:0 error:nil];
         urls = [[urls filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSURL *url, NSDictionary *_) {
@@ -165,57 +324,105 @@ static void SetError(NSError **error, NSString *message) {
             if ([action isEqualToString:@"idle"] || [action hasPrefix:@"walk-"]) continue;
             return NO;
         }
+        CGFloat loadMaxSide = MaxRasterSide;
+        NSSize sourceSize = SourcePixelSizeAtURL(urls.firstObject);
+        CGFloat loadScale = MAX(sourceSize.width, sourceSize.height) > loadMaxSide ?
+            loadMaxSide / MAX(sourceSize.width, sourceSize.height) : 1.0;
+        effectiveRasterScales[action] = @([rasterScales[action] ?: @1.0 doubleValue] * loadScale);
 
-        // ponytail: one action gets one coordinate system; per-frame cropping causes zooming and drift.
+        NSDictionary *savedLayout = layout[action];
         NSMutableArray *boundsByFrame = [NSMutableArray arrayWithCapacity:urls.count];
-        NSRect unionBounds = NSZeroRect;
-        BOOL hasVisibleFrame = NO;
-        for (NSURL *url in urls) @autoreleasepool {
-            NSValue *bounds = [self visibleBoundsAtURL:url];
-            [boundsByFrame addObject:bounds ?: NSNull.null];
-            if (bounds) {
-                unionBounds = hasVisibleFrame ? NSUnionRect(unionBounds, bounds.rectValue) : bounds.rectValue;
-                hasVisibleFrame = YES;
-            }
+        NSRect unionBounds = savedLayout ? NSRectFromString(savedLayout[@"crop"]) : NSZeroRect;
+        NSRect firstBounds = savedLayout ? NSRectFromString(savedLayout[@"first"]) : NSZeroRect;
+        if (savedLayout) {
+            unionBounds = NSMakeRect(unionBounds.origin.x * loadScale, unionBounds.origin.y * loadScale,
+                                     unionBounds.size.width * loadScale, unionBounds.size.height * loadScale);
+            firstBounds = NSMakeRect(firstBounds.origin.x * loadScale, firstBounds.origin.y * loadScale,
+                                     firstBounds.size.width * loadScale, firstBounds.size.height * loadScale);
         }
-        if (!hasVisibleFrame) return NO;
-        // Keep transparent source pixels around the union so interpolation cannot eat edge pixels.
-        NSSize canvasSize = [self pixelSizeAtURL:urls.firstObject];
-        unionBounds = NSIntersectionRect(NSInsetRect(unionBounds, -CropPadding, -CropPadding),
-                                         NSMakeRect(0, 0, canvasSize.width, canvasSize.height));
+        BOOL hasVisibleFrame = NO;
+        if (savedLayout) {
+            NSArray<NSNumber *> *visible = savedLayout[@"visible"];
+            for (NSUInteger i = 0; i < urls.count; i++) {
+                BOOL frameVisible = i < visible.count ? visible[i].boolValue : YES;
+                [boundsByFrame addObject:frameVisible ? [NSValue valueWithRect:firstBounds] : NSNull.null];
+            }
+            hasVisibleFrame = YES;
+        } else {
+            // ponytail: one action gets one coordinate system; per-frame cropping causes zooming and drift.
+            for (NSURL *url in urls) @autoreleasepool {
+                NSValue *bounds = [self visibleBoundsAtURL:url maxSide:loadMaxSide];
+                [boundsByFrame addObject:bounds ?: NSNull.null];
+                if (bounds) {
+                    if (!hasVisibleFrame) firstBounds = bounds.rectValue;
+                    unionBounds = hasVisibleFrame ? NSUnionRect(unionBounds, bounds.rectValue) : bounds.rectValue;
+                    hasVisibleFrame = YES;
+                }
+            }
+            if (!hasVisibleFrame) return NO;
+            NSSize canvasSize = [self pixelSizeAtURL:urls.firstObject maxSide:loadMaxSide];
+            unionBounds = NSIntersectionRect(NSInsetRect(unionBounds, -CropPadding, -CropPadding),
+                                             NSMakeRect(0, 0, canvasSize.width, canvasSize.height));
+        }
+        if ([Actions() containsObject:action]) {
+            actionURLs[action] = urls;
+            NSRect topOriginCrop = savedLayout ? NSRectFromString(savedLayout[@"crop"]) : NSMakeRect(
+                    unionBounds.origin.x / loadScale, unionBounds.origin.y / loadScale,
+                    unionBounds.size.width / loadScale, unionBounds.size.height / loadScale);
+            actionCropBounds[action] = [NSValue valueWithRect:
+                AppKitRectFromTopOriginRect(topOriginCrop, sourceSize.height)];
+        }
         NSUInteger firstVisible = [boundsByFrame indexOfObjectPassingTest:^BOOL(id value, NSUInteger _, BOOL *__) {
             return value != NSNull.null;
         }];
-        NSRect firstBounds = [boundsByFrame[firstVisible] rectValue];
-        // Keep body placement stable by aligning the first visible frame at bottom-center.
-        anchors[action] = [NSValue valueWithPoint:NSMakePoint(NSMidX(firstBounds) - NSMinX(unionBounds),
-                                                              NSMaxY(firstBounds) - NSMinY(unionBounds))];
+        NSPoint anchor = savedLayout ? NSPointFromString(savedLayout[@"anchor"]) :
+            NSMakePoint(NSMidX(firstBounds) - NSMinX(unionBounds),
+                        NSMaxY(firstBounds) - NSMinY(unionBounds));
+        if (!savedLayout && [Actions() containsObject:action])
+            anchor = NSMakePoint(anchor.x / loadScale, anchor.y / loadScale);
+        if (savedLayout && ![Actions() containsObject:action])
+            anchor = NSMakePoint(anchor.x * loadScale, anchor.y * loadScale);
+        anchors[action] = [NSValue valueWithPoint:anchor];
+        bodySizes[action] = [NSValue valueWithSize:firstBounds.size];
 
+        if ([Actions() containsObject:action]) {
+            NSImage *placeholder = [[NSImage alloc] initWithSize:unionBounds.size];
+            NSMutableArray<NSImage *> *placeholders = [NSMutableArray arrayWithCapacity:urls.count];
+            for (NSUInteger i = 0; i < urls.count; i++) [placeholders addObject:placeholder];
+            loaded[action] = placeholders;
+            if ([action isEqualToString:@"sa"]) {
+                newIdleImage = [self imageAtURL:urls[firstVisible] croppedTo:firstBounds maxSide:loadMaxSide];
+            }
+            continue;
+        }
         NSMutableArray<NSImage *> *images = [NSMutableArray array];
         for (NSUInteger i = 0; i < urls.count; i++) @autoreleasepool {
             if (boundsByFrame[i] == NSNull.null) {
                 if (images.lastObject) [images addObject:images.lastObject];
                 continue;
             }
-            NSImage *image = [self imageAtURL:urls[i] croppedTo:unionBounds];
+            NSImage *image = [self imageAtURL:urls[i] croppedTo:unionBounds maxSide:loadMaxSide];
             if (image) [images addObject:image];
         }
         if (images.count == 0) return NO;
         loaded[action] = images;
-        if ([action isEqualToString:@"sa"]) {
-            newIdleImage = [self imageAtURL:urls[firstVisible] croppedTo:firstBounds];
-        }
     }
     [self.timer invalidate];
     self.timer = nil;
     self.currentFrames = nil;
     self.actionFrames = loaded;
     self.actionAnchors = anchors;
+    self.frameBodySizes = bodySizes;
+    self.actionURLs = actionURLs;
+    self.actionCropBounds = actionCropBounds;
+    self.rasterScales = effectiveRasterScales;
+    self.sourceRasterScales = rasterScales;
     self.petID = petID;
     self.idleFrames = loaded[@"idle"] ?: @[newIdleImage ?: loaded[@"sa"].firstObject];
     self.walkLeftFrames = loaded[@"walk-left"];
     self.walkRightFrames = loaded[@"walk-right"];
     self.idleImage = self.idleFrames.firstObject;
+    self.idleRasterScale = [effectiveRasterScales[@"idle"] ?: effectiveRasterScales[@"sa"] ?: @1.0 doubleValue];
     NSURL *idleFPSURL = [[[resourceURL URLByAppendingPathComponent:@"frames"] URLByAppendingPathComponent:@"idle"]
                          URLByAppendingPathComponent:@"idle-fps.txt"];
     CGFloat configuredIdleFPS = [[NSString stringWithContentsOfURL:idleFPSURL encoding:NSUTF8StringEncoding error:nil]
@@ -225,9 +432,10 @@ static void SetError(NSError **error, NSString *message) {
         NSMakePoint(self.idleImage.size.width / 2.0, self.idleImage.size.height);
     self.displayScale = IdleDisplaySize * self.sizeMultiplier /
         MAX(self.idleImage.size.width, self.idleImage.size.height);
-    NSImage *walkCanvas = self.walkRightFrames.firstObject ?: self.walkLeftFrames.firstObject;
-    self.walkScale = walkCanvas ? IdleDisplaySize * self.sizeMultiplier /
-        MAX(walkCanvas.size.width, walkCanvas.size.height) : self.displayScale;
+    NSSize idleBody = [bodySizes[@"idle"] ?: bodySizes[@"sa"] sizeValue];
+    NSSize walkBody = [bodySizes[@"walk-right"] ?: bodySizes[@"walk-left"] sizeValue];
+    self.walkScale = idleBody.height > 0 && walkBody.height > 0 ?
+        self.displayScale * idleBody.height / walkBody.height : self.displayScale;
     self.currentScale = self.displayScale;
     self.currentImage = self.idleImage;
     if (self.window) {
@@ -257,7 +465,9 @@ static void SetError(NSError **error, NSString *message) {
 
 - (void)drawRect:(NSRect)dirtyRect {
     NSGraphicsContext.currentContext.imageInterpolation = NSImageInterpolationHigh;
-    NSSize imageSize = self.currentImage.size;
+    NSRect sourceRect = NSIsEmptyRect(self.currentSourceRect) ?
+        NSMakeRect(0, 0, self.currentImage.size.width, self.currentImage.size.height) : self.currentSourceRect;
+    NSSize imageSize = sourceRect.size;
     NSSize size = NSMakeSize(imageSize.width * self.currentScale, imageSize.height * self.currentScale);
     NSRect target = NSMakeRect(NSMidX(self.bounds) - size.width / 2.0, NSMidY(self.bounds) - size.height / 2.0,
                                size.width, size.height);
@@ -267,7 +477,7 @@ static void SetError(NSError **error, NSString *message) {
         NSAffineTransform *mirror = [NSAffineTransform transform];
         [mirror translateXBy:NSWidth(self.bounds) yBy:0]; [mirror scaleXBy:-1 yBy:1]; [mirror concat];
     }
-    [self.currentImage drawInRect:target fromRect:NSZeroRect operation:NSCompositingOperationSourceOver
+    [self.currentImage drawInRect:target fromRect:sourceRect operation:NSCompositingOperationSourceOver
                          fraction:1.0 respectFlipped:YES hints:nil];
     [NSGraphicsContext restoreGraphicsState];
 }
@@ -277,9 +487,9 @@ static void SetError(NSError **error, NSString *message) {
 }
 
 - (void)resizeWindowForAction:(NSString *)action {
-    NSImage *canvas = self.actionFrames[action].firstObject;
-    NSSize imageSize = canvas.size;
-    self.currentScale = self.displayScale;
+    NSSize imageSize = self.currentSourceRect.size;
+    CGFloat actionRasterScale = [self.sourceRasterScales[action] ?: @1.0 doubleValue];
+    self.currentScale = self.displayScale * self.idleRasterScale / actionRasterScale;
     NSSize drawn = NSMakeSize(imageSize.width * self.currentScale, imageSize.height * self.currentScale);
     CGFloat minimumSide = BaseWindowSize * self.sizeMultiplier;
     CGFloat padding = ActionPadding * self.sizeMultiplier;
@@ -319,6 +529,12 @@ static void SetError(NSError **error, NSString *message) {
     self.currentAction = action;
     self.currentFrames = self.actionFrames[action];
     self.frameIndex = 0;
+    NSURL *firstURL = self.actionURLs[action].firstObject;
+    NSValue *cropBounds = self.actionCropBounds[action];
+    NSImage *firstImage = firstURL ? [[NSImage alloc] initWithContentsOfURL:firstURL] : nil;
+    firstImage.cacheMode = NSImageCacheNever;
+    self.currentImage = firstImage ?: self.currentFrames.firstObject;
+    self.currentSourceRect = firstImage && cropBounds ? cropBounds.rectValue : NSZeroRect;
     [self resizeWindowForAction:action];
     self.timer = [NSTimer timerWithTimeInterval:1.0 / 25.0 target:self selector:@selector(nextFrame:)
                                        userInfo:nil repeats:YES];
@@ -334,6 +550,7 @@ static void SetError(NSError **error, NSString *message) {
     self.frameIndex = 0;
     self.currentScale = self.displayScale;
     self.currentImage = self.idleImage;
+    self.currentSourceRect = NSZeroRect;
     if (self.idleFrames.count > 1) {
         self.timer = [NSTimer timerWithTimeInterval:1.0 / self.idleFPS target:self selector:@selector(nextFrame:)
                                            userInfo:nil repeats:YES];
@@ -355,14 +572,22 @@ static void SetError(NSError **error, NSString *message) {
     if (self.frameIndex >= self.currentFrames.count) {
         if (self.mouseHeld && [self.currentAction isEqualToString:@"hited"]) {
             self.frameIndex = 0;
-            self.currentImage = self.currentFrames[self.frameIndex++];
+        } else {
+            [self.timer invalidate]; self.timer = nil;
+            [self restoreIdleWindow];
+            [self startIdlePlayback];
             [self setNeedsDisplay:YES];
             return;
         }
-        [self.timer invalidate]; self.timer = nil;
-        [self restoreIdleWindow];
-        [self startIdlePlayback];
-    } else self.currentImage = self.currentFrames[self.frameIndex++];
+    }
+    NSUInteger index = self.frameIndex++;
+    NSArray<NSURL *> *urls = self.actionURLs[self.currentAction];
+    NSURL *url = index < urls.count ? urls[index] : nil;
+    NSValue *cropBounds = self.actionCropBounds[self.currentAction];
+    NSImage *image = url ? [[NSImage alloc] initWithContentsOfURL:url] : nil;
+    image.cacheMode = NSImageCacheNever;
+    self.currentImage = image ?: self.currentFrames[index];
+    self.currentSourceRect = image && cropBounds ? cropBounds.rectValue : NSZeroRect;
     [self setNeedsDisplay:YES];
 }
 
@@ -564,9 +789,10 @@ static void SetError(NSError **error, NSString *message) {
     [self.timer invalidate]; self.timer = nil; self.mouseHeld = NO;
     self.sizeMultiplier = newSize;
     self.displayScale = IdleDisplaySize * newSize / MAX(self.idleImage.size.width, self.idleImage.size.height);
-    NSImage *walkCanvas = self.walkRightFrames.firstObject ?: self.walkLeftFrames.firstObject;
-    self.walkScale = walkCanvas ? IdleDisplaySize * newSize /
-        MAX(walkCanvas.size.width, walkCanvas.size.height) : self.displayScale;
+    NSSize idleBody = [self.frameBodySizes[@"idle"] ?: self.frameBodySizes[@"sa"] sizeValue];
+    NSSize walkBody = [self.frameBodySizes[@"walk-right"] ?: self.frameBodySizes[@"walk-left"] sizeValue];
+    self.walkScale = idleBody.height > 0 && walkBody.height > 0 ?
+        self.displayScale * idleBody.height / walkBody.height : self.displayScale;
     CGFloat side = BaseWindowSize * newSize;
     NSSize drawn = NSMakeSize(self.idleImage.size.width * self.displayScale,
                               self.idleImage.size.height * self.displayScale);
@@ -593,10 +819,29 @@ static void SetError(NSError **error, NSString *message) {
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property(nonatomic, strong) NSPanel *panel;
 @property(nonatomic, strong) PetView *petView;
+@property(nonatomic, strong) NSProgressIndicator *conversionProgress;
+@property(nonatomic, strong) NSTextField *conversionStatus;
 @property(nonatomic) BOOL converting;
 @end
 
 @implementation AppDelegate
+- (void)runModalBlock:(dispatch_block_t)block {
+    block();
+}
+
+- (void)performOnModalMainThread:(dispatch_block_t)block {
+    if (NSThread.isMainThread) { block(); return; }
+    [self performSelectorOnMainThread:@selector(runModalBlock:) withObject:[block copy]
+                       waitUntilDone:NO modes:@[NSModalPanelRunLoopMode]];
+}
+
+- (void)reportConversionProgress:(double)value status:(NSString *)status {
+    [self performOnModalMainThread:^{
+        self.conversionProgress.doubleValue = value;
+        if (status.length > 0) self.conversionStatus.stringValue = status;
+    }];
+}
+
 - (NSURL *)supportURL {
     NSURL *base = [[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory
                                                           inDomains:NSUserDomainMask].firstObject;
@@ -627,21 +872,50 @@ static void SetError(NSError **error, NSString *message) {
     }
 }
 
-- (BOOL)runFFDec:(NSArray<NSString *> *)arguments {
+- (BOOL)runFFDec:(NSArray<NSString *> *)arguments progress:(void (^)(double))progress {
     NSURL *resources = NSBundle.mainBundle.resourceURL;
     NSTask *task = [NSTask new];
     task.executableURL = [[resources URLByAppendingPathComponent:@"runtime/bin"] URLByAppendingPathComponent:@"java"];
-    NSMutableArray *args = [NSMutableArray arrayWithObjects:@"-jar",
+    NSMutableArray *args = [NSMutableArray arrayWithObjects:@"-Xmx1024m", @"-jar",
         [[resources URLByAppendingPathComponent:@"ffdec"] URLByAppendingPathComponent:@"ffdec.jar"].path, nil];
     [args addObjectsFromArray:arguments];
     task.arguments = args;
-    task.standardOutput = NSFileHandle.fileHandleWithNullDevice;
+    NSPipe *output = progress ? [NSPipe pipe] : nil;
+    task.standardOutput = output ?: NSFileHandle.fileHandleWithNullDevice;
     task.standardError = NSFileHandle.fileHandleWithNullDevice;
     @try {
         if (![task launchAndReturnError:nil]) return NO;
+        if (output) {
+            NSMutableData *pending = [NSMutableData data];
+            while (YES) {
+                NSData *data = output.fileHandleForReading.availableData;
+                if (data.length == 0) break;
+                [pending appendData:data];
+                NSString *text = [[NSString alloc] initWithData:pending encoding:NSUTF8StringEncoding];
+                NSRange lineBreak = [text rangeOfString:@"\n" options:NSBackwardsSearch];
+                if (lineBreak.location == NSNotFound) continue;
+                NSString *complete = [text substringToIndex:lineBreak.location];
+                NSData *remainder = [[text substringFromIndex:lineBreak.location + 1]
+                    dataUsingEncoding:NSUTF8StringEncoding];
+                pending = remainder.mutableCopy;
+                NSRegularExpression *regex = [NSRegularExpression
+                    regularExpressionWithPattern:@"Exported frame ([0-9]+)/([0-9]+)" options:0 error:nil];
+                NSTextCheckingResult *match = [regex matchesInString:complete options:0
+                    range:NSMakeRange(0, complete.length)].lastObject;
+                if (match.numberOfRanges == 3) {
+                    double current = [[complete substringWithRange:[match rangeAtIndex:1]] doubleValue];
+                    double total = [[complete substringWithRange:[match rangeAtIndex:2]] doubleValue];
+                    if (total > 0) progress(current / total);
+                }
+            }
+        }
         [task waitUntilExit];
         return task.terminationStatus == 0;
     } @catch (__unused NSException *exception) { return NO; }
+}
+
+- (BOOL)runFFDec:(NSArray<NSString *> *)arguments {
+    return [self runFFDec:arguments progress:nil];
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)idleInfoFromXMLURL:(NSURL *)xmlURL
@@ -680,6 +954,20 @@ static void SetError(NSError **error, NSString *message) {
     if (idleSpriteID < 0) return nil;
     CGFloat fps = [[document.rootElement attributeForName:@"frameRate"].stringValue doubleValue];
     return @{@"spriteID": @(idleSpriteID), @"fps": @(fps > 0 ? fps : 25.0)};
+}
+
+- (NSArray<NSNumber *> *)frameCountsFromXMLURL:(NSURL *)xmlURL actionIDs:(NSArray<NSNumber *> *)actionIDs {
+    NSXMLDocument *document = [[NSXMLDocument alloc] initWithContentsOfURL:xmlURL options:0 error:nil];
+    if (!document) return @[];
+    NSMutableArray<NSNumber *> *counts = [NSMutableArray arrayWithCapacity:actionIDs.count];
+    for (NSNumber *actionID in actionIDs) {
+        NSString *xpath = [NSString stringWithFormat:
+            @"//item[@type='DefineSpriteTag' and @spriteId='%@']", actionID];
+        NSXMLElement *sprite = (NSXMLElement *)[document nodesForXPath:xpath error:nil].firstObject;
+        NSInteger frameCount = [[sprite attributeForName:@"frameCount"].stringValue integerValue];
+        [counts addObject:@(frameCount)];
+    }
+    return counts;
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)movementInfoFromXMLURL:(NSURL *)xmlURL
@@ -785,19 +1073,52 @@ static void SetError(NSError **error, NSString *message) {
 }
 
 - (NSURL *)installPetID:(NSString *)petID error:(NSError **)error {
+    [self reportConversionProgress:2 status:@"检查本地缓存…"];
     NSURL *cached = [self cachedPetURL:petID];
     [self installIdleForPetID:petID intoPetURL:cached];
     NSURL *idleScanMarker = [cached URLByAppendingPathComponent:@".idle-scan-v1"];
     NSURL *walkScanMarker = [cached URLByAppendingPathComponent:@".walk-scan-v2"];
+    NSURL *rasterMarker = [cached URLByAppendingPathComponent:@".raster-v3"];
     if ([[NSFileManager defaultManager] fileExistsAtPath:[[cached URLByAppendingPathComponent:@"frames"] path]] &&
         [[NSFileManager defaultManager] fileExistsAtPath:idleScanMarker.path] &&
-        [[NSFileManager defaultManager] fileExistsAtPath:walkScanMarker.path]) return cached;
+        [[NSFileManager defaultManager] fileExistsAtPath:walkScanMarker.path]) {
+        if ([NSFileManager.defaultManager
+             fileExistsAtPath:[[cached URLByAppendingPathComponent:@".raster-v1"] path]] ||
+            [NSFileManager.defaultManager
+             fileExistsAtPath:[[cached URLByAppendingPathComponent:@".raster-v2"] path]]) {
+            [NSFileManager.defaultManager removeItemAtURL:cached error:nil];
+        } else {
+            if (![NSFileManager.defaultManager fileExistsAtPath:rasterMarker.path]) {
+                [self reportConversionProgress:85 status:@"优化旧缓存的帧尺寸…"];
+                if (!NormalizeFramesAtURL([cached URLByAppendingPathComponent:@"frames"], @{}, ^(double fraction) {
+                    [self reportConversionProgress:85 + fraction * 12 status:@"优化旧缓存的帧尺寸…"];
+                })) {
+                    SetError(error, @"动作帧尺寸优化失败"); return nil;
+                }
+                [NSData.data writeToURL:rasterMarker atomically:YES];
+            }
+            NSURL *framesURL = [cached URLByAppendingPathComponent:@"frames"];
+            if (![NSFileManager.defaultManager
+                 fileExistsAtPath:[[framesURL URLByAppendingPathComponent:@".layout-v1.plist"] path]]) {
+                [self reportConversionProgress:97 status:@"分析帧边界与动作位置…"];
+                PetView *scanner = [[PetView alloc] initWithFrame:NSZeroRect];
+                if (![scanner writeLayoutMetadataForFramesURL:framesURL progress:^(double fraction) {
+                    [self reportConversionProgress:97 + fraction * 2 status:@"分析帧边界与动作位置…"];
+                }]) {
+                    SetError(error, @"动作位置分析失败"); return nil;
+                }
+            }
+            [self reportConversionProgress:100 status:@"缓存准备完成"];
+            return cached;
+        }
+    }
     NSFileManager *fm = NSFileManager.defaultManager;
     NSURL *temp = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString]];
     [fm createDirectoryAtURL:temp withIntermediateDirectories:YES attributes:nil error:nil];
     NSURL *swf = [temp URLByAppendingPathComponent:[petID stringByAppendingPathExtension:@"swf"]];
     NSURL *remote = [NSURL URLWithString:[NSString stringWithFormat:
         @"https://seer.61.com/resource/fightResource/pet/swf/%@.swf", petID]];
+    [self reportConversionProgress:5 status:@"下载官方战斗资源…"];
     NSData *data = [NSData dataWithContentsOfURL:remote options:0 error:error];
     if (data.length < 4 || ![data writeToURL:swf options:NSDataWritingAtomic error:error]) {
         [fm removeItemAtURL:temp error:nil];
@@ -807,6 +1128,7 @@ static void SetError(NSError **error, NSString *message) {
 
     NSURL *symbols = [temp URLByAppendingPathComponent:@"symbols"];
     [fm createDirectoryAtURL:symbols withIntermediateDirectories:YES attributes:nil error:nil];
+    [self reportConversionProgress:12 status:@"读取精灵动作表…"];
     if (![self runFFDec:@[@"-export", @"symbolClass", symbols.path, swf.path]]) {
         SetError(error, @"无法读取这个 SWF 的动作表"); [fm removeItemAtURL:temp error:nil]; return nil;
     }
@@ -834,21 +1156,50 @@ static void SetError(NSError **error, NSString *message) {
 
     NSURL *xml = [temp URLByAppendingPathComponent:@"structure.xml"];
     NSDictionary<NSString *, NSNumber *> *idleInfo = nil;
+    NSArray<NSNumber *> *frameCounts = @[];
+    [self reportConversionProgress:18 status:@"分析待机与动作结构…"];
     if ([self runFFDec:@[@"-swf2xml", swf.path, xml.path]]) {
         idleInfo = [self idleInfoFromXMLURL:xml actionIDs:[ids subarrayWithRange:NSMakeRange(0, 3)]];
+        frameCounts = [self frameCountsFromXMLURL:xml actionIDs:ids];
     }
     NSMutableArray<NSString *> *exportIDStrings = idStrings.mutableCopy;
     if (idleInfo) [exportIDStrings addObject:idleInfo[@"spriteID"].stringValue];
 
     NSURL *exportURL = [temp URLByAppendingPathComponent:@"export"];
     [fm createDirectoryAtURL:exportURL withIntermediateDirectories:YES attributes:nil error:nil];
-    if (![self runFFDec:@[@"-selectid", [exportIDStrings componentsJoinedByString:@","], @"-ignorebackground",
-                          @"-format", @"sprite:png", @"-export", @"sprite", exportURL.path, swf.path]]) {
-        SetError(error, @"动作帧提取失败"); [fm removeItemAtURL:temp error:nil]; return nil;
+    // ponytail: export one sprite per JVM so complex pets cannot retain every action in one heap.
+    NSInteger totalFrames = 0;
+    for (NSNumber *count in frameCounts) totalFrames += count.integerValue;
+    BOOL complexPet = totalFrames > 320;
+    NSMutableDictionary<NSString *, NSNumber *> *exportScales = [NSMutableDictionary dictionary];
+    for (NSUInteger i = 0; i < exportIDStrings.count; i++) {
+        NSString *spriteID = exportIDStrings[i];
+        NSString *name = i < Actions().count ? DefaultActionNames()[Actions()[i]] : @"待机动作";
+        CGFloat zoom = 1.0;
+        if (complexPet && i < 3) zoom = 0.5;
+        NSString *action = i < Actions().count ? Actions()[i] : @"idle";
+        exportScales[action] = @(zoom);
+        double actionStart = 25 + 50.0 * i / exportIDStrings.count;
+        double actionSpan = 50.0 / exportIDStrings.count;
+        [self reportConversionProgress:actionStart
+                                status:[NSString stringWithFormat:@"提取%@（%lu/%lu）…", name,
+                                        (unsigned long)i + 1, (unsigned long)exportIDStrings.count]];
+        if (![self runFFDec:@[@"-selectid", spriteID, @"-ignorebackground", @"-zoom",
+                              [NSString stringWithFormat:@"%g", zoom], @"-format", @"sprite:png",
+                              @"-export", @"sprite", exportURL.path, swf.path]
+                       progress:^(double fraction) {
+            [self reportConversionProgress:actionStart + actionSpan * fraction
+                                    status:[NSString stringWithFormat:@"提取%@（%lu/%lu，%.0f%%）…", name,
+                                            (unsigned long)i + 1, (unsigned long)exportIDStrings.count,
+                                            fraction * 100]];
+        }]) {
+            SetError(error, @"动作帧提取失败"); [fm removeItemAtURL:temp error:nil]; return nil;
+        }
     }
 
     NSURL *stagedPet = [temp URLByAppendingPathComponent:@"pet"];
     NSURL *stagedFrames = [stagedPet URLByAppendingPathComponent:@"frames"];
+    [self reportConversionProgress:76 status:@"整理动作帧…"];
     [fm createDirectoryAtURL:stagedFrames withIntermediateDirectories:YES attributes:nil error:nil];
     NSArray<NSURL *> *exported = [fm contentsOfDirectoryAtURL:exportURL includingPropertiesForKeys:nil options:0 error:nil];
     for (NSUInteger i = 0; i < 4; i++) {
@@ -873,14 +1224,30 @@ static void SetError(NSError **error, NSString *message) {
                 writeToURL:[idleDestination URLByAppendingPathComponent:@"idle-fps.txt"] atomically:YES];
         }
     }
+    [self reportConversionProgress:80 status:@"提取左右移动动作…"];
     [self installWalkFramesForPetID:petID intoFramesURL:stagedFrames temporaryURL:temp];
+    [self reportConversionProgress:85 status:@"优化帧尺寸和内存占用…"];
+    if (!NormalizeFramesAtURL(stagedFrames, exportScales, ^(double fraction) {
+        [self reportConversionProgress:85 + fraction * 12 status:@"优化帧尺寸和内存占用…"];
+    })) {
+        SetError(error, @"动作帧尺寸优化失败"); [fm removeItemAtURL:temp error:nil]; return nil;
+    }
+    [self reportConversionProgress:97 status:@"分析帧边界与动作位置…"];
+    PetView *scanner = [[PetView alloc] initWithFrame:NSZeroRect];
+    if (![scanner writeLayoutMetadataForFramesURL:stagedFrames progress:^(double fraction) {
+        [self reportConversionProgress:97 + fraction * 2 status:@"分析帧边界与动作位置…"];
+    }]) {
+        SetError(error, @"动作位置分析失败"); [fm removeItemAtURL:temp error:nil]; return nil;
+    }
     [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".idle-scan-v1"] atomically:YES];
     [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".walk-scan-v2"] atomically:YES];
+    [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".raster-v3"] atomically:YES];
     [fm createDirectoryAtURL:cached.URLByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
     [fm removeItemAtURL:cached error:nil];
     if (![fm moveItemAtURL:stagedPet toURL:cached error:error]) { [fm removeItemAtURL:temp error:nil]; return nil; }
     [self installIdleForPetID:petID intoPetURL:cached];
     [fm removeItemAtURL:temp error:nil];
+    [self reportConversionProgress:100 status:@"精灵准备完成"];
     return cached;
 }
 
@@ -892,12 +1259,28 @@ static void SetError(NSError **error, NSString *message) {
 
 - (void)changePet:(id)sender {
     if (self.converting) return;
+    if (sender) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self changePet:nil]; });
+        return;
+    }
+    [NSApp activateIgnoringOtherApps:YES];
     NSAlert *input = [NSAlert new];
     input.messageText = @"更换赛尔号精灵";
     input.informativeText = @"输入精灵编号。首次使用该编号需要联网下载并转换。";
     [input addButtonWithTitle:@"更换"]; [input addButtonWithTitle:@"取消"];
     NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 220, 24)];
     field.placeholderString = @"例如：1"; field.stringValue = self.petView.petID ?: @"1"; input.accessoryView = field;
+    input.window.initialFirstResponder = field;
+    [input.window makeKeyAndOrderFront:nil];
+    [input.window makeFirstResponder:field];
+    [field selectText:nil];
+    BOOL testingInput = NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_INPUT"] != nil;
+    NSTimer *focusTimer = [NSTimer timerWithTimeInterval:0 repeats:NO block:^(__unused NSTimer *timer) {
+        BOOL focused = [input.window makeFirstResponder:field];
+        [field selectText:nil];
+        if (testingInput) exit(focused ? 0 : 12);
+    }];
+    [NSRunLoop.mainRunLoop addTimer:focusTimer forMode:NSModalPanelRunLoopMode];
     if ([input runModal] != NSAlertFirstButtonReturn) return;
     NSString *petID = [field.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (petID.length == 0 || [petID rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location != NSNotFound || petID.integerValue <= 0) {
@@ -907,15 +1290,26 @@ static void SetError(NSError **error, NSString *message) {
     self.converting = YES;
     __block NSURL *petURL = nil;
     __block NSError *conversionError = nil;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        petURL = [self installPetID:petID error:&conversionError];
-        dispatch_async(dispatch_get_main_queue(), ^{ [NSApp abortModal]; });
-    });
+    NSView *progressView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 48)];
+    self.conversionStatus = [NSTextField labelWithString:@"准备转换…"];
+    self.conversionStatus.frame = NSMakeRect(0, 28, 320, 18);
+    self.conversionProgress = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0, 4, 320, 16)];
+    self.conversionProgress.indeterminate = NO;
+    self.conversionProgress.minValue = 0; self.conversionProgress.maxValue = 100;
+    self.conversionProgress.doubleValue = 0;
+    [progressView addSubview:self.conversionStatus];
+    [progressView addSubview:self.conversionProgress];
     NSAlert *progress = [NSAlert new];
     progress.messageText = [NSString stringWithFormat:@"正在准备 %@ 号精灵…", petID];
-    progress.informativeText = @"首次转换通常需要几秒钟，请稍候。";
+    progress.informativeText = @"复杂精灵可能需要几分钟，转换期间会限制内存占用。";
+    progress.accessoryView = progressView;
     [progress addButtonWithTitle:@"请稍候"].enabled = NO;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        petURL = [self installPetID:petID error:&conversionError];
+        [self performOnModalMainThread:^{ [NSApp abortModal]; }];
+    });
     [progress runModal];
+    self.conversionProgress = nil; self.conversionStatus = nil;
     self.converting = NO;
     if (!petURL || ![self.petView loadFramesFromURL:petURL petID:petID]) {
         if (petURL) [NSFileManager.defaultManager removeItemAtURL:petURL error:nil];
@@ -931,8 +1325,12 @@ static void SetError(NSError **error, NSString *message) {
     [self installIdleForPetID:petID intoPetURL:resourceURL];
     BOOL hasCachedFrames = [NSFileManager.defaultManager
         fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@"frames"] path]];
-    if (hasCachedFrames && ![NSFileManager.defaultManager
-        fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".walk-scan-v2"] path]]) {
+    BOOL needsUpgrade = hasCachedFrames &&
+        (![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".walk-scan-v2"] path]] ||
+         ![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".raster-v3"] path]] ||
+         ![NSFileManager.defaultManager fileExistsAtPath:
+             [[[resourceURL URLByAppendingPathComponent:@"frames"] URLByAppendingPathComponent:@".layout-v1.plist"] path]]);
+    if (needsUpgrade) {
         NSURL *upgraded = [self installPetID:petID error:nil];
         if (upgraded) resourceURL = upgraded;
     }
@@ -963,6 +1361,19 @@ static void SetError(NSError **error, NSString *message) {
     [self.panel setFrameOrigin:NSMakePoint(NSMidX(visible) - size.width / 2.0, NSMidY(visible) - size.height / 2.0)];
     [NSApp activateIgnoringOtherApps:YES]; [self.panel makeKeyAndOrderFront:nil];
 
+    if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_MODAL_CALLBACK"]) {
+        NSAlert *alert = [NSAlert new];
+        alert.messageText = @"测试模态回调";
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            [self performOnModalMainThread:^{ [NSApp abortModal]; }];
+        });
+        [alert runModal];
+        exit(0);
+    }
+    if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_INPUT"]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self changePet:NSMenuItem.new]; });
+        return;
+    }
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_UNCONSTRAINED"]) {
         NSPoint target = NSMakePoint(NSMinX(screen.frame), NSMaxY(screen.frame) + 100.0);
         [self.panel setFrameOrigin:target];
@@ -987,6 +1398,12 @@ static void SetError(NSError **error, NSString *message) {
         BOOL bounced = self.petView.movementDirection > 0 && !self.petView.facingLeft;
         BOOL usedRightWalk = self.petView.walkRightFrames.count > 1 &&
             self.petView.currentFrames == self.petView.walkRightFrames;
+        NSSize idleBody = [self.petView.frameBodySizes[@"idle"] ?: self.petView.frameBodySizes[@"sa"] sizeValue];
+        NSSize walkBody = [self.petView.frameBodySizes[@"walk-right"] ?:
+                           self.petView.frameBodySizes[@"walk-left"] sizeValue];
+        BOOL sameWalkScale = idleBody.height <= 0 || walkBody.height <= 0 ||
+            fabs(idleBody.height * self.petView.displayScale -
+                 walkBody.height * self.petView.walkScale) < 1.0;
         self.petView.facingLeft = YES;
         BOOL mirrored = fabs([self.petView orientedAnchorX:10 imageWidth:100] - 90.0) < 0.01;
         [self.petView play:@"attack"];
@@ -1007,7 +1424,7 @@ static void SetError(NSError **error, NSString *message) {
         self.petView.petID = originalPetID;
         if (oldA) [defaults setObject:oldA forKey:@"actionNames.__testA"]; else [defaults removeObjectForKey:@"actionNames.__testA"];
         if (oldB) [defaults setObject:oldB forKey:@"actionNames.__testB"]; else [defaults removeObjectForKey:@"actionNames.__testB"];
-        exit(movedLeft && usedLeftWalk && stoppedLeft && bounced && usedRightWalk && mirrored &&
+        exit(movedLeft && usedLeftWalk && stoppedLeft && bounced && usedRightWalk && sameWalkScale && mirrored &&
              mirroredActionAligned && customized && reset && isolated ? 0 : 9);
     }
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_RANDOM_ATTACK"]) {
@@ -1025,8 +1442,20 @@ static void SetError(NSError **error, NSString *message) {
         [self.petView mouseDown:testEvent];
         BOOL started = self.petView.mouseHeld && self.petView.playingAction &&
             [self.petView.currentAction isEqualToString:@"hited"];
+        self.petView.frameIndex = self.petView.currentFrames.count;
+        [self.petView nextFrame:nil];
+        BOOL loopedCompletely = self.petView.frameIndex == 1 &&
+            NSMaxX(self.petView.currentSourceRect) <= self.petView.currentImage.size.width &&
+            NSMaxY(self.petView.currentSourceRect) <= self.petView.currentImage.size.height;
+        for (NSURL *url in self.petView.actionURLs[@"hited"]) {
+            NSValue *visibleValue = [self.petView visibleBoundsAtURL:url maxSide:CGFLOAT_MAX];
+            NSRect visible = AppKitRectFromTopOriginRect(visibleValue.rectValue,
+                                                         SourcePixelSizeAtURL(url).height);
+            loopedCompletely = loopedCompletely &&
+                NSContainsRect(self.petView.currentSourceRect, visible);
+        }
         [self.petView mouseUp:testEvent];
-        exit(started && !self.petView.mouseHeld && !self.petView.playingAction ? 0 : 7);
+        exit(started && loopedCompletely && !self.petView.mouseHeld && !self.petView.playingAction ? 0 : 7);
     }
     NSString *testPetID = NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_PET_ID"];
     if (testPetID) {
@@ -1041,19 +1470,29 @@ static void SetError(NSError **error, NSString *message) {
         NSSize idleSize = self.panel.frame.size;
         [self.petView play:@"attack"];
         NSSize actionSize = self.panel.frame.size;
-        BOOL expanded = actionSize.width > idleSize.width || actionSize.height > idleSize.height;
+        NSSize canvas = self.petView.currentImage.size;
+        BOOL complete = canvas.width * self.petView.currentScale <= actionSize.width &&
+                        canvas.height * self.petView.currentScale <= actionSize.height &&
+                        actionSize.width >= idleSize.width && actionSize.height >= idleSize.height;
+        BOOL sameSourceScale = fabs(self.petView.currentScale *
+                                    [self.petView.sourceRasterScales[@"attack"] doubleValue] -
+                                    self.petView.displayScale * self.petView.idleRasterScale) < 0.001;
         BOOL aligned = hypot(self.petView.actionAnchorScreenPosition.x - self.petView.restingCenter.x,
                              self.petView.actionAnchorScreenPosition.y - self.petView.restingCenter.y) < 1.0;
         CGFloat originalSize = self.petView.sizeMultiplier;
+        [self.petView.timer invalidate];
+        [self.petView restoreIdleWindow];
+        [self.petView startIdlePlayback];
         BOOL sizesValid = YES;
         for (NSNumber *value in PetSizes()) {
             NSMenuItem *item = [NSMenuItem new]; item.representedObject = value;
             [self.petView changeSize:item];
-            sizesValid = sizesValid && fabs(self.panel.frame.size.width - BaseWindowSize * value.doubleValue) < 1.0;
+            sizesValid = sizesValid &&
+                fabs(self.panel.frame.size.width - BaseWindowSize * value.doubleValue) < 1.0;
         }
         NSMenuItem *restore = [NSMenuItem new]; restore.representedObject = @(originalSize);
         [self.petView changeSize:restore];
-        exit(expanded && aligned && sizesValid ? 0 : 6);
+        exit(complete && sameSourceScale && aligned && sizesValid ? 0 : 6);
     }
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_LAYOUT"]) {
         for (NSString *action in Actions()) {

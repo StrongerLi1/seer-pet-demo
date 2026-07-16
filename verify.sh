@@ -21,6 +21,8 @@ SEER_PET_TEST_MOUSE=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 SEER_PET_TEST_UNCONSTRAINED=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 SEER_PET_TEST_MOVEMENT=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 SEER_PET_TEST_RANDOM_ATTACK=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
+SEER_PET_TEST_INPUT=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
+SEER_PET_TEST_MODAL_CALLBACK=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 SEER_PET_TEST_PET_ID=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 for action in attack sa cp hited; do
   SEER_PET_TEST_ACTION="$action" ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
