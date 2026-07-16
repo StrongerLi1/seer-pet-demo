@@ -13,8 +13,9 @@ static const CGFloat IdleDisplaySize = 448.0;
 static const CGFloat ActionPadding = 8.0;
 static const CGFloat CropPadding = 8.0;
 static const CGFloat DefaultIdleFPS = 12.0;
-static const CGFloat MovementFPS = 30.0;
+static const CGFloat MovementFPS = 25.0;
 static const CGFloat MovementSpeed = 60.0;
+static const CGFloat RandomAttackInterval = 8.0;
 static void SetError(NSError **error, NSString *message) {
     if (error) *error = [NSError errorWithDomain:@"SeerPet" code:1 userInfo:@{NSLocalizedDescriptionKey: message}];
 }
@@ -22,17 +23,21 @@ static void SetError(NSError **error, NSString *message) {
 @interface PetView : NSView <NSMenuDelegate>
 @property(nonatomic, strong) NSDictionary<NSString *, NSArray<NSImage *> *> *actionFrames;
 @property(nonatomic, strong) NSArray<NSImage *> *idleFrames;
+@property(nonatomic, strong) NSArray<NSImage *> *walkLeftFrames;
+@property(nonatomic, strong) NSArray<NSImage *> *walkRightFrames;
 @property(nonatomic, strong) NSArray<NSImage *> *currentFrames;
 @property(nonatomic, strong) NSImage *currentImage;
 @property(nonatomic, strong) NSImage *idleImage;
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, strong) NSTimer *movementTimer;
+@property(nonatomic, strong) NSTimer *randomAttackTimer;
 @property(nonatomic, strong) NSDictionary<NSString *, NSValue *> *actionAnchors;
 @property(nonatomic, copy) NSString *petID;
 @property(nonatomic, copy) NSString *currentAction;
 @property(nonatomic) CGFloat displayScale;
 @property(nonatomic) CGFloat currentScale;
 @property(nonatomic) CGFloat idleFPS;
+@property(nonatomic) CGFloat walkScale;
 @property(nonatomic) CGFloat sizeMultiplier;
 @property(nonatomic) CGFloat movementDirection;
 @property(nonatomic) NSPoint restingCenter;
@@ -46,6 +51,7 @@ static void SetError(NSError **error, NSString *message) {
 @property(nonatomic) BOOL playingAction;
 @property(nonatomic) BOOL mouseHeld;
 @property(nonatomic) BOOL freeMovementEnabled;
+@property(nonatomic) BOOL randomAttackEnabled;
 @property(nonatomic) BOOL movementPaused;
 @property(nonatomic) BOOL facingLeft;
 - (instancetype)initWithFrame:(NSRect)frame resourceURL:(NSURL *)resourceURL petID:(NSString *)petID;
@@ -54,6 +60,7 @@ static void SetError(NSError **error, NSString *message) {
 - (void)startIdlePlayback;
 - (void)changeSize:(NSMenuItem *)sender;
 - (void)movementTick:(NSTimer *)timer;
+- (void)randomAttackTick:(NSTimer *)timer;
 - (NSString *)actionNameForKey:(NSString *)action;
 - (CGFloat)orientedAnchorX:(CGFloat)x imageWidth:(CGFloat)width;
 @end
@@ -125,6 +132,7 @@ static void SetError(NSError **error, NSString *message) {
         CGFloat savedSize = [NSUserDefaults.standardUserDefaults doubleForKey:@"petSize"];
         self.sizeMultiplier = [PetSizes() containsObject:@(savedSize)] ? savedSize : 1.0;
         self.freeMovementEnabled = [NSUserDefaults.standardUserDefaults boolForKey:@"freeMovement"];
+        self.randomAttackEnabled = [NSUserDefaults.standardUserDefaults boolForKey:@"randomAttack"];
         self.movementDirection = 1.0;
         if (![self loadFramesFromURL:resourceURL petID:petID]) return nil;
         self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -133,6 +141,7 @@ static void SetError(NSError **error, NSString *message) {
         [self updateIdleBob];
         [self startIdlePlayback];
         [self updateMovementTimer];
+        [self updateRandomAttackTimer];
     }
     return self;
 }
@@ -142,7 +151,7 @@ static void SetError(NSError **error, NSString *message) {
     NSMutableDictionary<NSString *, NSValue *> *anchors = [NSMutableDictionary dictionary];
     NSImage *newIdleImage = nil;
     NSMutableArray<NSString *> *allActions = Actions().mutableCopy;
-    [allActions addObject:@"idle"];
+    [allActions addObjectsFromArray:@[@"idle", @"walk-left", @"walk-right"]];
     for (NSString *action in allActions) {
         NSURL *directory = [[resourceURL URLByAppendingPathComponent:@"frames"] URLByAppendingPathComponent:action];
         NSArray<NSURL *> *urls = [[NSFileManager defaultManager] contentsOfDirectoryAtURL:directory
@@ -153,7 +162,7 @@ static void SetError(NSError **error, NSString *message) {
             return [a.lastPathComponent compare:b.lastPathComponent options:NSNumericSearch];
         }];
         if (urls.count == 0) {
-            if ([action isEqualToString:@"idle"]) continue;
+            if ([action isEqualToString:@"idle"] || [action hasPrefix:@"walk-"]) continue;
             return NO;
         }
 
@@ -204,6 +213,8 @@ static void SetError(NSError **error, NSString *message) {
     self.actionAnchors = anchors;
     self.petID = petID;
     self.idleFrames = loaded[@"idle"] ?: @[newIdleImage ?: loaded[@"sa"].firstObject];
+    self.walkLeftFrames = loaded[@"walk-left"];
+    self.walkRightFrames = loaded[@"walk-right"];
     self.idleImage = self.idleFrames.firstObject;
     NSURL *idleFPSURL = [[[resourceURL URLByAppendingPathComponent:@"frames"] URLByAppendingPathComponent:@"idle"]
                          URLByAppendingPathComponent:@"idle-fps.txt"];
@@ -214,6 +225,9 @@ static void SetError(NSError **error, NSString *message) {
         NSMakePoint(self.idleImage.size.width / 2.0, self.idleImage.size.height);
     self.displayScale = IdleDisplaySize * self.sizeMultiplier /
         MAX(self.idleImage.size.width, self.idleImage.size.height);
+    NSImage *walkCanvas = self.walkRightFrames.firstObject ?: self.walkLeftFrames.firstObject;
+    self.walkScale = walkCanvas ? IdleDisplaySize * self.sizeMultiplier /
+        MAX(walkCanvas.size.width, walkCanvas.size.height) : self.displayScale;
     self.currentScale = self.displayScale;
     self.currentImage = self.idleImage;
     if (self.window) {
@@ -248,7 +262,8 @@ static void SetError(NSError **error, NSString *message) {
     NSRect target = NSMakeRect(NSMidX(self.bounds) - size.width / 2.0, NSMidY(self.bounds) - size.height / 2.0,
                                size.width, size.height);
     [NSGraphicsContext saveGraphicsState];
-    if (self.facingLeft) {
+    BOOL nativeWalkFrame = self.currentFrames == self.walkLeftFrames || self.currentFrames == self.walkRightFrames;
+    if (self.facingLeft && !nativeWalkFrame) {
         NSAffineTransform *mirror = [NSAffineTransform transform];
         [mirror translateXBy:NSWidth(self.bounds) yBy:0]; [mirror scaleXBy:-1 yBy:1]; [mirror concat];
     }
@@ -375,8 +390,30 @@ static void SetError(NSError **error, NSString *message) {
         nextX = NSMaxX(bounds) - NSWidth(frame); self.movementDirection = -1.0;
     }
     [self setFacingLeftIfNeeded:self.movementDirection < 0];
+    NSArray<NSImage *> *walkFrames = self.facingLeft ? self.walkLeftFrames : self.walkRightFrames;
+    if (walkFrames.count > 0) {
+        if (self.currentFrames != walkFrames) {
+            [self.timer invalidate]; self.timer = nil;
+            self.currentFrames = walkFrames; self.frameIndex = 0; self.currentScale = self.walkScale;
+        }
+        self.currentImage = walkFrames[self.frameIndex++ % walkFrames.count];
+        [self setNeedsDisplay:YES];
+    }
     [self.window setFrameOrigin:NSMakePoint(nextX, NSMinY(frame))];
     self.restingFrame = self.window.frame;
+}
+
+- (void)updateRandomAttackTimer {
+    [self.randomAttackTimer invalidate]; self.randomAttackTimer = nil;
+    if (!self.randomAttackEnabled) return;
+    self.randomAttackTimer = [NSTimer timerWithTimeInterval:RandomAttackInterval target:self
+                                                   selector:@selector(randomAttackTick:) userInfo:nil repeats:YES];
+    [NSRunLoop.mainRunLoop addTimer:self.randomAttackTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)randomAttackTick:(NSTimer *)timer {
+    if (!self.randomAttackEnabled || self.movementPaused || self.mouseHeld || self.playingAction) return;
+    [self play:Actions()[arc4random_uniform(3)]];
 }
 
 - (void)mouseDown:(NSEvent *)event {
@@ -454,8 +491,14 @@ static void SetError(NSError **error, NSString *message) {
 - (void)toggleFreeMovement:(NSMenuItem *)sender {
     self.freeMovementEnabled = !self.freeMovementEnabled;
     [NSUserDefaults.standardUserDefaults setBool:self.freeMovementEnabled forKey:@"freeMovement"];
-    if (!self.freeMovementEnabled) [self setFacingLeftIfNeeded:NO];
+    if (!self.freeMovementEnabled) [self startIdlePlayback];
     [self updateMovementTimer];
+}
+
+- (void)toggleRandomAttack:(NSMenuItem *)sender {
+    self.randomAttackEnabled = !self.randomAttackEnabled;
+    [NSUserDefaults.standardUserDefaults setBool:self.randomAttackEnabled forKey:@"randomAttack"];
+    [self updateRandomAttackTimer];
 }
 
 - (NSMenu *)menuForEvent:(NSEvent *)event {
@@ -476,6 +519,10 @@ static void SetError(NSError **error, NSString *message) {
     NSMenuItem *freeMovement = [menu addItemWithTitle:@"自由移动" action:@selector(toggleFreeMovement:) keyEquivalent:@""];
     freeMovement.target = self;
     freeMovement.state = self.freeMovementEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    NSMenuItem *randomAttack = [menu addItemWithTitle:@"每 8 秒随机攻击"
+                                               action:@selector(toggleRandomAttack:) keyEquivalent:@""];
+    randomAttack.target = self;
+    randomAttack.state = self.randomAttackEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     NSMenuItem *sizeItem = [menu addItemWithTitle:@"调整大小" action:nil keyEquivalent:@""];
     NSMenu *sizeMenu = [[NSMenu alloc] initWithTitle:@"调整大小"];
     for (NSNumber *size in PetSizes()) {
@@ -517,6 +564,9 @@ static void SetError(NSError **error, NSString *message) {
     [self.timer invalidate]; self.timer = nil; self.mouseHeld = NO;
     self.sizeMultiplier = newSize;
     self.displayScale = IdleDisplaySize * newSize / MAX(self.idleImage.size.width, self.idleImage.size.height);
+    NSImage *walkCanvas = self.walkRightFrames.firstObject ?: self.walkLeftFrames.firstObject;
+    self.walkScale = walkCanvas ? IdleDisplaySize * newSize /
+        MAX(walkCanvas.size.width, walkCanvas.size.height) : self.displayScale;
     CGFloat side = BaseWindowSize * newSize;
     NSSize drawn = NSMakeSize(self.idleImage.size.width * self.displayScale,
                               self.idleImage.size.height * self.displayScale);
@@ -632,12 +682,116 @@ static void SetError(NSError **error, NSString *message) {
     return @{@"spriteID": @(idleSpriteID), @"fps": @(fps > 0 ? fps : 25.0)};
 }
 
+- (NSDictionary<NSString *, NSNumber *> *)movementInfoFromXMLURL:(NSURL *)xmlURL
+                                                         spriteID:(NSInteger)spriteID {
+    NSXMLDocument *document = [[NSXMLDocument alloc] initWithContentsOfURL:xmlURL options:0 error:nil];
+    if (!document || spriteID <= 0) return nil;
+    NSString *xpath = [NSString stringWithFormat:
+        @"//item[@type='DefineSpriteTag' and @spriteId='%ld']", (long)spriteID];
+    NSXMLElement *sprite = (NSXMLElement *)[document nodesForXPath:xpath error:nil].firstObject;
+    NSXMLElement *subTags = [sprite elementsForName:@"subTags"].firstObject;
+    if (!subTags) return nil;
+
+    NSInteger frame = 1;
+    NSMutableArray<NSDictionary *> *labels = [NSMutableArray array];
+    for (NSXMLNode *node in subTags.children) {
+        if (node.kind != NSXMLElementKind) continue;
+        NSXMLElement *element = (NSXMLElement *)node;
+        NSString *type = [element attributeForName:@"type"].stringValue;
+        if ([type isEqualToString:@"FrameLabelTag"]) {
+            NSString *name = [element attributeForName:@"name"].stringValue;
+            if (name.length > 0) [labels addObject:@{@"name": name, @"start": @(frame)}];
+        } else if ([type isEqualToString:@"ShowFrameTag"]) {
+            frame++;
+        }
+    }
+
+    NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+    for (NSUInteger i = 0; i < labels.count; i++) {
+        NSString *name = labels[i][@"name"];
+        if (![name isEqualToString:@"left"] && ![name isEqualToString:@"right"]) continue;
+        NSInteger start = [labels[i][@"start"] integerValue];
+        NSInteger end = i + 1 < labels.count ? [labels[i + 1][@"start"] integerValue] - 1 : frame - 1;
+        result[[name stringByAppendingString:@"Start"]] = @(start);
+        result[[name stringByAppendingString:@"End"]] = @(end);
+    }
+    CGFloat fps = [[document.rootElement attributeForName:@"frameRate"].stringValue doubleValue];
+    result[@"fps"] = @(fps > 0 ? fps : 25.0);
+    return result[@"leftStart"] && result[@"rightStart"] ? result : nil;
+}
+
+- (void)installWalkFramesForPetID:(NSString *)petID
+                    intoFramesURL:(NSURL *)framesURL
+                     temporaryURL:(NSURL *)temporaryURL {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSInteger numericID = petID.integerValue;
+    NSString *path = numericID > 500 ?
+        [NSString stringWithFormat:@"groupFightResource/pet/%ld.swf", (long)numericID] :
+        [NSString stringWithFormat:@"pet/swf/%ld.swf", (long)numericID];
+    NSData *data = [NSData dataWithContentsOfURL:
+        [NSURL URLWithString:[@"https://seer.61.com/resource/" stringByAppendingString:path]]];
+    if (data.length < 4) return;
+
+    NSURL *swf = [temporaryURL URLByAppendingPathComponent:@"movement.swf"];
+    if (![data writeToURL:swf atomically:YES]) return;
+    NSURL *symbols = [temporaryURL URLByAppendingPathComponent:@"movement-symbols"];
+    [fm createDirectoryAtURL:symbols withIntermediateDirectories:YES attributes:nil error:nil];
+    if (![self runFFDec:@[@"-export", @"symbolClass", symbols.path, swf.path]]) return;
+    NSString *csv = [NSString stringWithContentsOfURL:[symbols URLByAppendingPathComponent:@"symbols.csv"]
+                                              encoding:NSUTF8StringEncoding error:nil];
+    NSInteger spriteID = -1;
+    for (NSString *line in [csv componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        if (![line containsString:@"\"pet\""]) continue;
+        spriteID = [[[line componentsSeparatedByString:@";"] firstObject] integerValue]; break;
+    }
+    if (spriteID <= 0) return;
+
+    NSURL *xml = [temporaryURL URLByAppendingPathComponent:@"movement.xml"];
+    if (![self runFFDec:@[@"-swf2xml", swf.path, xml.path]]) return;
+    NSDictionary<NSString *, NSNumber *> *info = [self movementInfoFromXMLURL:xml spriteID:spriteID];
+    if (!info) return;
+
+    NSURL *exportURL = [temporaryURL URLByAppendingPathComponent:@"movement-export"];
+    [fm createDirectoryAtURL:exportURL withIntermediateDirectories:YES attributes:nil error:nil];
+    if (![self runFFDec:@[@"-selectid", @(spriteID).stringValue, @"-ignorebackground", @"-zoom", @"4",
+                          @"-format", @"sprite:png", @"-export", @"sprite", exportURL.path, swf.path]]) return;
+    NSString *prefix = [NSString stringWithFormat:@"DefineSprite_%ld", (long)spriteID];
+    NSURL *source = [[fm contentsOfDirectoryAtURL:exportURL includingPropertiesForKeys:nil options:0 error:nil]
+        filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSURL *url, NSDictionary *_) {
+            return [url.lastPathComponent hasPrefix:prefix];
+        }]].firstObject;
+    if (!source) return;
+
+    NSArray<NSURL *> *frames = [[fm contentsOfDirectoryAtURL:source includingPropertiesForKeys:nil options:0 error:nil]
+        filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSURL *url, NSDictionary *_) {
+            return [url.pathExtension.lowercaseString isEqualToString:@"png"];
+        }]];
+    for (NSString *direction in @[@"left", @"right"]) {
+        NSInteger start = [info[[direction stringByAppendingString:@"Start"]] integerValue];
+        NSInteger end = [info[[direction stringByAppendingString:@"End"]] integerValue];
+        NSURL *destination = [framesURL URLByAppendingPathComponent:
+            [@"walk-" stringByAppendingString:direction]];
+        [fm createDirectoryAtURL:destination withIntermediateDirectories:YES attributes:nil error:nil];
+        for (NSURL *frameURL in frames) {
+            NSInteger frameNumber = frameURL.lastPathComponent.stringByDeletingPathExtension.integerValue;
+            if (frameNumber >= start && frameNumber <= end) {
+                [fm copyItemAtURL:frameURL toURL:[destination URLByAppendingPathComponent:
+                                                  frameURL.lastPathComponent] error:nil];
+            }
+        }
+        NSArray *copied = [fm contentsOfDirectoryAtURL:destination includingPropertiesForKeys:nil options:0 error:nil];
+        if (copied.count == 0) [fm removeItemAtURL:destination error:nil];
+    }
+}
+
 - (NSURL *)installPetID:(NSString *)petID error:(NSError **)error {
     NSURL *cached = [self cachedPetURL:petID];
     [self installIdleForPetID:petID intoPetURL:cached];
     NSURL *idleScanMarker = [cached URLByAppendingPathComponent:@".idle-scan-v1"];
+    NSURL *walkScanMarker = [cached URLByAppendingPathComponent:@".walk-scan-v2"];
     if ([[NSFileManager defaultManager] fileExistsAtPath:[[cached URLByAppendingPathComponent:@"frames"] path]] &&
-        [[NSFileManager defaultManager] fileExistsAtPath:idleScanMarker.path]) return cached;
+        [[NSFileManager defaultManager] fileExistsAtPath:idleScanMarker.path] &&
+        [[NSFileManager defaultManager] fileExistsAtPath:walkScanMarker.path]) return cached;
     NSFileManager *fm = NSFileManager.defaultManager;
     NSURL *temp = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString]];
     [fm createDirectoryAtURL:temp withIntermediateDirectories:YES attributes:nil error:nil];
@@ -719,7 +873,9 @@ static void SetError(NSError **error, NSString *message) {
                 writeToURL:[idleDestination URLByAppendingPathComponent:@"idle-fps.txt"] atomically:YES];
         }
     }
+    [self installWalkFramesForPetID:petID intoFramesURL:stagedFrames temporaryURL:temp];
     [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".idle-scan-v1"] atomically:YES];
+    [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".walk-scan-v2"] atomically:YES];
     [fm createDirectoryAtURL:cached.URLByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
     [fm removeItemAtURL:cached error:nil];
     if (![fm moveItemAtURL:stagedPet toURL:cached error:error]) { [fm removeItemAtURL:temp error:nil]; return nil; }
@@ -773,6 +929,13 @@ static void SetError(NSError **error, NSString *message) {
     NSString *petID = [NSUserDefaults.standardUserDefaults stringForKey:@"petID"] ?: @"1";
     NSURL *resourceURL = [self cachedPetURL:petID];
     [self installIdleForPetID:petID intoPetURL:resourceURL];
+    BOOL hasCachedFrames = [NSFileManager.defaultManager
+        fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@"frames"] path]];
+    if (hasCachedFrames && ![NSFileManager.defaultManager
+        fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".walk-scan-v2"] path]]) {
+        NSURL *upgraded = [self installPetID:petID error:nil];
+        if (upgraded) resourceURL = upgraded;
+    }
     if (![[NSFileManager defaultManager] fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@"frames"] path]]) {
         petID = @"1"; resourceURL = NSBundle.mainBundle.resourceURL;
     }
@@ -814,9 +977,16 @@ static void SetError(NSError **error, NSString *message) {
         CGFloat before = NSMinX(self.panel.frame); self.petView.movementDirection = -1.0;
         [self.petView movementTick:nil];
         BOOL movedLeft = NSMinX(self.panel.frame) < before && self.petView.facingLeft;
+        BOOL usedLeftWalk = self.petView.walkLeftFrames.count > 1 &&
+            self.petView.currentFrames == self.petView.walkLeftFrames;
+        self.petView.freeMovementEnabled = NO; [self.petView startIdlePlayback];
+        BOOL stoppedLeft = self.petView.facingLeft && self.petView.currentFrames == self.petView.idleFrames;
+        self.petView.freeMovementEnabled = YES;
         [self.panel setFrameOrigin:NSMakePoint(NSMinX(travel), NSMinY(frame))];
         self.petView.movementDirection = -1.0; [self.petView movementTick:nil];
         BOOL bounced = self.petView.movementDirection > 0 && !self.petView.facingLeft;
+        BOOL usedRightWalk = self.petView.walkRightFrames.count > 1 &&
+            self.petView.currentFrames == self.petView.walkRightFrames;
         self.petView.facingLeft = YES;
         BOOL mirrored = fabs([self.petView orientedAnchorX:10 imageWidth:100] - 90.0) < 0.01;
         [self.petView play:@"attack"];
@@ -837,7 +1007,18 @@ static void SetError(NSError **error, NSString *message) {
         self.petView.petID = originalPetID;
         if (oldA) [defaults setObject:oldA forKey:@"actionNames.__testA"]; else [defaults removeObjectForKey:@"actionNames.__testA"];
         if (oldB) [defaults setObject:oldB forKey:@"actionNames.__testB"]; else [defaults removeObjectForKey:@"actionNames.__testB"];
-        exit(movedLeft && bounced && mirrored && mirroredActionAligned && customized && reset && isolated ? 0 : 9);
+        exit(movedLeft && usedLeftWalk && stoppedLeft && bounced && usedRightWalk && mirrored &&
+             mirroredActionAligned && customized && reset && isolated ? 0 : 9);
+    }
+    if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_RANDOM_ATTACK"]) {
+        [self.petView.randomAttackTimer invalidate]; self.petView.randomAttackTimer = nil;
+        self.petView.randomAttackEnabled = YES; self.petView.movementPaused = NO;
+        self.petView.mouseHeld = NO; self.petView.playingAction = NO;
+        [self.petView randomAttackTick:nil];
+        BOOL selectedAttack = self.petView.playingAction &&
+            [[Actions() subarrayWithRange:NSMakeRange(0, 3)] containsObject:self.petView.currentAction];
+        self.petView.randomAttackEnabled = NO; [self.petView updateRandomAttackTimer];
+        exit(selectedAttack && !self.petView.randomAttackTimer ? 0 : 10);
     }
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_MOUSE"]) {
         NSEvent *testEvent = [NSEvent new];
@@ -851,7 +1032,10 @@ static void SetError(NSError **error, NSString *message) {
     if (testPetID) {
         NSError *error = nil; NSURL *url = [self installPetID:testPetID error:&error];
         BOOL loaded = url && [self.petView loadFramesFromURL:url petID:testPetID];
-        exit(loaded && (![testPetID isEqualToString:@"1"] || self.petView.idleFrames.count > 1) ? 0 : 4);
+        BOOL movementLoaded = ![testPetID isEqualToString:@"1"] ||
+            (self.petView.walkLeftFrames.count > 1 && self.petView.walkRightFrames.count > 1);
+        exit(loaded && movementLoaded &&
+             (![testPetID isEqualToString:@"1"] || self.petView.idleFrames.count > 1) ? 0 : 4);
     }
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_SCALE"]) {
         NSSize idleSize = self.panel.frame.size;
@@ -885,7 +1069,7 @@ static void SetError(NSError **error, NSString *message) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((count / 25.0 + 0.5) * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             CGFloat side = BaseWindowSize * self.petView.sizeMultiplier;
-            BOOL restored = !self.petView.playingAction && self.petView.currentFrames == self.petView.idleFrames &&
+            BOOL restored = !self.petView.playingAction &&
                             NSEqualSizes(self.panel.frame.size, NSMakeSize(side, side));
             exit(restored ? 0 : 3);
         });
