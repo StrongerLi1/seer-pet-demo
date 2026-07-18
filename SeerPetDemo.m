@@ -19,6 +19,118 @@ static const CGFloat RandomAttackInterval = 8.0;
 static const CGFloat MaxRasterSide = IdleDisplaySize * 2.0;
 static const CGFloat MaxActionRasterSide = 4096.0;
 static NSString * const PetInstancesKey = @"petInstances.v1";
+static BOOL RunningTests(void) {
+    for (NSString *key in NSProcessInfo.processInfo.environment)
+        if ([key hasPrefix:@"SEER_PET_TEST_"]) return YES;
+    return NO;
+}
+static NSImage *PetBagButtonImage(NSString *name, NSString *state) {
+    NSURL *directory = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"PetBagButtons"];
+    return [[NSImage alloc] initWithContentsOfURL:
+        [directory URLByAppendingPathComponent:[NSString stringWithFormat:@"%@-%@.png", name, state]]];
+}
+static NSImage *PetBagSlotImage(NSString *name) {
+    NSURL *directory = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"PetBagSlots"];
+    return [[NSImage alloc] initWithContentsOfURL:[directory URLByAppendingPathComponent:
+        [NSString stringWithFormat:@"%@.png", name]]];
+}
+static NSImage *PetBagInfoImage(NSString *name) {
+    NSURL *directory = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"PetBagInfo"];
+    return [[NSImage alloc] initWithContentsOfURL:[directory URLByAppendingPathComponent:
+        [NSString stringWithFormat:@"%@.png", name]]];
+}
+static NSAttributedString *PetBagFieldText(NSString *label, NSString *value) {
+    NSDictionary *white = @{NSFontAttributeName: [NSFont systemFontOfSize:14],
+                            NSForegroundColorAttributeName: NSColor.whiteColor};
+    NSDictionary *yellow = @{NSFontAttributeName: [NSFont systemFontOfSize:14],
+                             NSForegroundColorAttributeName: NSColor.yellowColor};
+    NSMutableAttributedString *text = [[NSMutableAttributedString alloc] initWithString:label attributes:white];
+    [text appendAttributedString:[[NSAttributedString alloc] initWithString:value attributes:yellow]];
+    return text;
+}
+static NSString *NormalizedPetID(NSString *petID) {
+    return [NSString stringWithFormat:@"%ld", (long)petID.integerValue];
+}
+static NSArray<NSNumber *> *PetBaseStats(NSString *petID) {
+    static NSDictionary<NSString *, NSArray<NSNumber *> *> *allStats;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        allStats = [NSDictionary dictionaryWithContentsOfURL:
+            [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"PetStats.plist"]] ?: @{};
+    });
+    return allStats[NormalizedPetID(petID)];
+}
+static NSString *PetDefaultName(NSString *petID) {
+    static NSDictionary<NSString *, NSString *> *allNames;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        allNames = [NSDictionary dictionaryWithContentsOfURL:
+            [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"PetNames.plist"]] ?: @{};
+    });
+    NSString *normalizedID = NormalizedPetID(petID);
+    return allNames[normalizedID] ?: [NSString stringWithFormat:@"%@ 号精灵", normalizedID];
+}
+static NSArray *PetMetadata(NSString *petID) {
+    static NSDictionary<NSString *, NSArray *> *allMetadata;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        allMetadata = [NSDictionary dictionaryWithContentsOfURL:
+            [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"PetMeta.plist"]] ?: @{};
+    });
+    return allMetadata[NormalizedPetID(petID)];
+}
+static NSArray *PetMoveInfo(NSNumber *skillID) {
+    static NSDictionary<NSString *, NSArray *> *allMoves;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        allMoves = [NSDictionary dictionaryWithContentsOfURL:
+            [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"PetMoves.plist"]] ?: @{};
+    });
+    return allMoves[skillID.stringValue];
+}
+static NSString *PetActionForMoveInfo(NSArray *move) {
+    NSInteger category = move.count > 3 ? [move[3] integerValue] : 1;
+    return category == 2 ? @"sa" : (category == 4 ? @"cp" : @"attack");
+}
+static NSString *PetTypeName(NSNumber *typeID) {
+    static NSDictionary<NSString *, NSString *> *allTypes;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        allTypes = [NSDictionary dictionaryWithContentsOfURL:
+            [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"PetTypes.plist"]] ?: @{};
+    });
+    return allTypes[typeID.stringValue] ?: @"--";
+}
+static NSImage *PetTypeIconNamed(NSString *name) {
+    NSURL *directory = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"PetTypeIcons"];
+    NSURL *url = [directory URLByAppendingPathComponent:
+        [name stringByAppendingPathExtension:@"png"]];
+    return [[NSImage alloc] initWithContentsOfURL:url];
+}
+static NSImage *PetTypeIcon(NSNumber *typeID) { return PetTypeIconNamed(typeID.stringValue); }
+static NSImage *PetGenderIcon(NSInteger gender) {
+    NSURL *directory = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"PetGenderIcons"];
+    NSURL *url = [directory URLByAppendingPathComponent:
+        [[NSString stringWithFormat:@"%ld", (long)gender] stringByAppendingPathExtension:@"png"]];
+    return [[NSImage alloc] initWithContentsOfURL:url];
+}
+static NSArray<NSNumber *> *PetDefaultSkillIDs(NSString *petID) {
+    NSArray *metadata = PetMetadata(petID), *moves = metadata.count > 5 ? metadata[5] : @[];
+    NSMutableArray *slots = [@[[NSNull null], [NSNull null], [NSNull null], [NSNull null]] mutableCopy];
+    for (NSArray *move in moves) {
+        NSInteger tag = move.count > 3 && [move[2] boolValue] ? [move[3] integerValue] : 0;
+        if (tag >= 1 && tag <= 4) slots[tag - 1] = move[0];
+    }
+    for (NSArray *move in moves.reverseObjectEnumerator) {
+        if ([slots containsObject:move[0]]) continue;
+        NSUInteger empty = [slots indexOfObject:NSNull.null];
+        if (empty == NSNotFound) break;
+        slots[empty] = move[0];
+    }
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:4];
+    for (id skillID in slots) if ([skillID isKindOfClass:NSNumber.class]) [result addObject:skillID];
+    return result;
+}
 static void SetError(NSError **error, NSString *message) {
     if (error) *error = [NSError errorWithDomain:@"SeerPet" code:1 userInfo:@{NSLocalizedDescriptionKey: message}];
 }
@@ -117,6 +229,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 @property(nonatomic, strong) NSArray<NSImage *> *currentFrames;
 @property(nonatomic, strong) NSImage *currentImage;
 @property(nonatomic, strong) NSImage *idleImage;
+@property(nonatomic, strong) NSImage *bagImage;
 @property(nonatomic, strong) NSDictionary<NSString *, NSArray<NSURL *> *> *actionURLs;
 @property(nonatomic, strong) NSDictionary<NSString *, NSValue *> *actionCropBounds;
 @property(nonatomic, strong) NSDictionary<NSString *, NSNumber *> *rasterScales;
@@ -131,6 +244,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 @property(nonatomic, copy) NSString *instanceID;
 @property(nonatomic, copy) NSString *displayName;
 @property(nonatomic, copy) NSString *petID;
+@property(nonatomic, strong) NSMutableArray<NSNumber *> *selectedSkillIDs;
 @property(nonatomic, copy) NSString *currentAction;
 @property(nonatomic) CGFloat displayScale;
 @property(nonatomic) CGFloat currentScale;
@@ -139,6 +253,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 @property(nonatomic) CGFloat walkScale;
 @property(nonatomic) CGFloat sizeMultiplier;
 @property(nonatomic) CGFloat movementDirection;
+@property(nonatomic) NSTimeInterval createdAt;
 @property(nonatomic) NSPoint restingCenter;
 @property(nonatomic) NSRect restingFrame;
 @property(nonatomic) NSPoint idleAnchor;
@@ -151,6 +266,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 @property(nonatomic) BOOL mouseHeld;
 @property(nonatomic) BOOL freeMovementEnabled;
 @property(nonatomic) BOOL randomAttackEnabled;
+@property(nonatomic) BOOL desktopVisible;
 @property(nonatomic) BOOL movementPaused;
 @property(nonatomic) BOOL facingLeft;
 - (instancetype)initWithFrame:(NSRect)frame resourceURL:(NSURL *)resourceURL record:(NSDictionary *)record;
@@ -160,7 +276,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 - (void)changeSize:(NSMenuItem *)sender;
 - (void)movementTick:(NSTimer *)timer;
 - (void)randomAttackTick:(NSTimer *)timer;
-- (NSString *)actionNameForKey:(NSString *)action;
+- (void)resetDefaultSkills;
 - (CGFloat)orientedAnchorX:(CGFloat)x imageWidth:(CGFloat)width;
 - (BOOL)writeLayoutMetadataForFramesURL:(NSURL *)framesURL progress:(void (^)(double))progress;
 @end
@@ -243,13 +359,24 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     if ((self = [super initWithFrame:frame])) {
         NSString *petID = [record[@"petID"] description] ?: @"1";
         self.instanceID = [record[@"id"] description] ?: NSUUID.UUID.UUIDString;
-        self.displayName = [record[@"name"] description] ?: [NSString stringWithFormat:@"%@ 号精灵", petID];
+        self.displayName = [record[@"name"] description] ?: PetDefaultName(petID);
+        self.createdAt = [record[@"createdAt"] doubleValue];
+        if (self.createdAt <= 0) self.createdAt = NSDate.date.timeIntervalSince1970;
         CGFloat savedSize = [record[@"size"] doubleValue];
         self.sizeMultiplier = [PetSizes() containsObject:@(savedSize)] ? savedSize : 1.0;
         self.freeMovementEnabled = [record[@"freeMovement"] boolValue];
         self.randomAttackEnabled = [record[@"randomAttack"] boolValue];
+        self.desktopVisible = record[@"visible"] ? [record[@"visible"] boolValue] : YES;
         self.movementDirection = 1.0;
         if (![self loadFramesFromURL:resourceURL petID:petID]) return nil;
+        NSMutableSet *available = [NSMutableSet set];
+        NSArray *metadata = PetMetadata(petID);
+        for (NSArray *move in (metadata.count > 5 ? metadata[5] : @[])) [available addObject:move[0]];
+        NSMutableArray *savedSkills = [NSMutableArray arrayWithCapacity:4];
+        for (NSNumber *skillID in (record[@"skills"] ?: @[]))
+            if ([available containsObject:skillID] && ![savedSkills containsObject:skillID] && savedSkills.count < 4)
+                [savedSkills addObject:skillID];
+        self.selectedSkillIDs = savedSkills.count ? savedSkills : PetDefaultSkillIDs(petID).mutableCopy;
         self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         self.wantsLayer = YES;
         self.layer.backgroundColor = NSColor.clearColor.CGColor;
@@ -259,6 +386,10 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         [self updateRandomAttackTimer];
     }
     return self;
+}
+
+- (void)resetDefaultSkills {
+    self.selectedSkillIDs = PetDefaultSkillIDs(self.petID).mutableCopy;
 }
 
 - (BOOL)writeLayoutMetadataForFramesURL:(NSURL *)framesURL progress:(void (^)(double))progress {
@@ -436,6 +567,11 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     self.walkLeftFrames = loaded[@"walk-left"];
     self.walkRightFrames = loaded[@"walk-right"];
     self.idleImage = self.idleFrames.firstObject;
+    NSURL *bagImageURL = [[[resourceURL URLByAppendingPathComponent:@"frames"]
+                           URLByAppendingPathComponent:@"bag-front"] URLByAppendingPathComponent:@"1.png"];
+    NSValue *bagBounds = [self visibleBoundsAtURL:bagImageURL maxSide:MaxRasterSide];
+    self.bagImage = bagBounds ? [self imageAtURL:bagImageURL croppedTo:bagBounds.rectValue
+                                                       maxSide:MaxRasterSide] : self.idleImage;
     self.idleRasterScale = [effectiveRasterScales[@"idle"] ?: effectiveRasterScales[@"sa"] ?: @1.0 doubleValue];
     NSURL *idleFPSURL = [[[resourceURL URLByAppendingPathComponent:@"frames"] URLByAppendingPathComponent:@"idle"]
                          URLByAppendingPathComponent:@"idle-fps.txt"];
@@ -682,46 +818,9 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     }
     [self.owner savePetInstances];
 }
-- (void)playAttack:(id)sender { [self play:@"attack"]; }
-- (void)playSA:(id)sender { [self play:@"sa"]; }
-- (void)playCP:(id)sender { [self play:@"cp"]; }
-- (void)playHited:(id)sender { [self play:@"hited"]; }
-
-- (NSString *)actionNamesDefaultsKey {
-    return [NSString stringWithFormat:@"actionNames.instance.%@", self.instanceID];
-}
-
-- (NSString *)actionNameForKey:(NSString *)action {
-    NSString *custom = [NSUserDefaults.standardUserDefaults dictionaryForKey:self.actionNamesDefaultsKey][action];
-    return custom.length > 0 ? custom : DefaultActionNames()[action];
-}
-
-- (void)customizeActionNames:(id)sender {
-    self.movementPaused = YES;
-    NSAlert *alert = [NSAlert new]; alert.messageText = [NSString stringWithFormat:@"%@ 号精灵动作名称", self.petID];
-    alert.informativeText = @"名称只对当前精灵生效。";
-    [alert addButtonWithTitle:@"保存"]; [alert addButtonWithTitle:@"取消"];
-    NSView *form = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 116)];
-    NSMutableDictionary<NSString *, NSTextField *> *fields = [NSMutableDictionary dictionary];
-    NSArray<NSString *> *labels = @[@"普通攻击", @"特殊攻击", @"属性攻击", @"受击"];
-    for (NSUInteger i = 0; i < Actions().count; i++) {
-        CGFloat y = 88.0 - i * 29.0;
-        NSTextField *label = [NSTextField labelWithString:labels[i]]; label.frame = NSMakeRect(0, y + 2, 72, 22);
-        NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(78, y, 242, 24)];
-        field.stringValue = [self actionNameForKey:Actions()[i]];
-        [form addSubview:label]; [form addSubview:field]; fields[Actions()[i]] = field;
-    }
-    alert.accessoryView = form;
-    if ([alert runModal] == NSAlertFirstButtonReturn) {
-        NSMutableDictionary *names = [NSMutableDictionary dictionary];
-        for (NSString *action in Actions()) {
-            NSString *name = [fields[action].stringValue stringByTrimmingCharactersInSet:
-                              NSCharacterSet.whitespaceAndNewlineCharacterSet];
-            names[action] = name.length > 0 ? name : DefaultActionNames()[action];
-        }
-        [NSUserDefaults.standardUserDefaults setObject:names forKey:self.actionNamesDefaultsKey];
-    }
-    self.movementPaused = NO;
+- (void)playConfiguredSkill:(NSMenuItem *)sender {
+    NSArray *move = PetMoveInfo(sender.representedObject);
+    [self play:PetActionForMoveInfo(move)];
 }
 
 - (void)renamePet:(id)sender {
@@ -743,10 +842,6 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     self.movementPaused = NO;
 }
 
-- (void)resetActionNames:(id)sender {
-    [NSUserDefaults.standardUserDefaults removeObjectForKey:self.actionNamesDefaultsKey];
-}
-
 - (void)toggleFreeMovement:(NSMenuItem *)sender {
     self.freeMovementEnabled = !self.freeMovementEnabled;
     if (!self.freeMovementEnabled) [self startIdlePlayback];
@@ -765,15 +860,11 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     NSMenu *menu = [[NSMenu alloc] initWithTitle:
         [NSString stringWithFormat:@"%@（%@ 号）", self.displayName, self.petID]];
     menu.autoenablesItems = NO; menu.delegate = self;
-    NSArray *items = @[
-        @[[self actionNameForKey:@"attack"], NSStringFromSelector(@selector(playAttack:))],
-        @[[self actionNameForKey:@"sa"], NSStringFromSelector(@selector(playSA:))],
-        @[[self actionNameForKey:@"cp"], NSStringFromSelector(@selector(playCP:))],
-        @[[self actionNameForKey:@"hited"], NSStringFromSelector(@selector(playHited:))]
-    ];
-    for (NSArray *item in items) {
-        NSMenuItem *menuItem = [menu addItemWithTitle:item[0] action:NSSelectorFromString(item[1]) keyEquivalent:@""];
-        menuItem.target = self;
+    for (NSNumber *skillID in self.selectedSkillIDs) {
+        NSArray *move = PetMoveInfo(skillID);
+        NSString *title = move.count ? move[0] : [NSString stringWithFormat:@"技能 %@", skillID];
+        NSMenuItem *menuItem = [menu addItemWithTitle:title action:@selector(playConfiguredSkill:) keyEquivalent:@""];
+        menuItem.target = self; menuItem.representedObject = skillID;
     }
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *freeMovement = [menu addItemWithTitle:@"自由移动" action:@selector(toggleFreeMovement:) keyEquivalent:@""];
@@ -795,10 +886,8 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *rename = [menu addItemWithTitle:@"重命名…" action:@selector(renamePet:) keyEquivalent:@""];
     rename.target = self;
-    NSMenuItem *customize = [menu addItemWithTitle:@"自定义动作名称…" action:@selector(customizeActionNames:) keyEquivalent:@""];
-    customize.target = self;
-    NSMenuItem *reset = [menu addItemWithTitle:@"重置动作名称" action:@selector(resetActionNames:) keyEquivalent:@""];
-    reset.target = self;
+    NSMenuItem *skills = [menu addItemWithTitle:@"更换技能…" action:@selector(replaceManagedPetSkills:) keyEquivalent:@""];
+    skills.target = NSApp.delegate; skills.representedObject = self;
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *change = [menu addItemWithTitle:@"更换精灵…" action:@selector(changePet:) keyEquivalent:@""];
     change.target = NSApp.delegate; change.representedObject = self;
@@ -855,17 +944,146 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 - (NSRect)constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen { return frameRect; }
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, PetViewOwner, NSTableViewDataSource, NSTableViewDelegate>
+@interface PetBagButton : NSButton
+@property(nonatomic, strong) NSImage *upImage;
+@property(nonatomic, strong) NSImage *overImage;
+@property(nonatomic, strong) NSTrackingArea *hoverArea;
+- (void)setUpImage:(NSImage *)upImage overImage:(NSImage *)overImage;
+@end
+
+@implementation PetBagButton
+- (void)setUpImage:(NSImage *)upImage overImage:(NSImage *)overImage {
+    _upImage = upImage; _overImage = overImage; self.image = upImage;
+}
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (self.hoverArea) [self removeTrackingArea:self.hoverArea];
+    self.hoverArea = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+        options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
+        owner:self userInfo:nil];
+    [self addTrackingArea:self.hoverArea];
+}
+- (void)mouseEntered:(NSEvent *)event { self.image = self.overImage ?: self.upImage; }
+- (void)mouseExited:(NSEvent *)event { self.image = self.upImage; }
+- (void)mouseDown:(NSEvent *)event {
+    self.image = self.upImage; [super mouseDown:event];
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    self.image = NSPointInRect(point, self.bounds) ? (self.overImage ?: self.upImage) : self.upImage;
+}
+@end
+
+@interface PetBagSlotButton : NSButton
+@property(nonatomic, strong) NSImage *petImage;
+@property(nonatomic, copy) NSString *petName;
+@property(nonatomic, copy) NSString *petNumber;
+@property(nonatomic) BOOL primarySlot;
+@property(nonatomic) BOOL selectedSlot;
+@property(nonatomic) BOOL petShown;
+@property(nonatomic) BOOL occupied;
+@end
+
+@implementation PetBagSlotButton
+- (BOOL)isFlipped { return NO; }
+- (void)drawRect:(NSRect)dirtyRect {
+    NSString *color = self.primarySlot ? @"yellow" : @"blue";
+    NSString *state = self.selectedSlot ? @"selected" : @"normal";
+    [PetBagSlotImage([NSString stringWithFormat:@"%@-%@", color, state])
+        drawInRect:self.bounds fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
+    if (!self.occupied) return;
+
+    NSRect petBox = NSMakeRect(3, 9, 56, 56);
+    NSSize size = self.petImage.size;
+    CGFloat scale = size.width > 0 && size.height > 0 ? MIN(NSWidth(petBox) / size.width, NSHeight(petBox) / size.height) : 1;
+    NSSize drawn = NSMakeSize(size.width * scale, size.height * scale);
+    NSRect petRect = NSMakeRect(NSMidX(petBox) - drawn.width / 2, NSMidY(petBox) - drawn.height / 2,
+                                drawn.width, drawn.height);
+    [NSGraphicsContext currentContext].imageInterpolation = NSImageInterpolationHigh;
+    [self.petImage drawInRect:petRect fromRect:NSZeroRect operation:NSCompositingOperationSourceOver
+                     fraction:1.0 respectFlipped:YES hints:nil];
+
+    NSDictionary *nameStyle = @{NSFontAttributeName: [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold],
+                                NSForegroundColorAttributeName: NSColor.whiteColor};
+    NSDictionary *smallStyle = @{NSFontAttributeName: [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold],
+                                 NSForegroundColorAttributeName: NSColor.whiteColor};
+    [self.petName drawInRect:NSMakeRect(52, 29, 68, 18) withAttributes:nameStyle];
+    [@"lv.--" drawInRect:NSMakeRect(20, 4, 44, 15) withAttributes:smallStyle];
+    [@"100/100" drawInRect:NSMakeRect(73, 4, 47, 15) withAttributes:smallStyle];
+    [[NSColor colorWithWhite:0.25 alpha:0.9] setFill]; NSRectFill(NSMakeRect(50, 24, 61, 4));
+    [[NSColor colorWithRed:0.94 green:0.10 blue:0.13 alpha:1] setFill]; NSRectFill(NSMakeRect(50, 24, 61, 4));
+}
+@end
+
+@interface PetBagSkillView : NSControl
+@property(nonatomic, strong) NSNumber *skillID;
+@property(nonatomic, copy) NSString *skillName;
+@property(nonatomic, copy) NSString *typeName;
+@property(nonatomic, strong) NSImage *typeIcon;
+@property(nonatomic, copy) NSString *powerText;
+@property(nonatomic, copy) NSString *ppText;
+@end
+
+@implementation PetBagSkillView
+- (void)setSkillName:(NSString *)skillName { _skillName = skillName.copy; [self setNeedsDisplay:YES]; }
+- (void)setTypeIcon:(NSImage *)typeIcon { _typeIcon = typeIcon; [self setNeedsDisplay:YES]; }
+- (void)resetCursorRects { [self addCursorRect:self.bounds cursor:NSCursor.pointingHandCursor]; }
+- (void)mouseDown:(NSEvent *)event { if (self.enabled) [self sendAction:self.action to:self.target]; }
+- (void)drawRect:(NSRect)dirtyRect {
+    NSImage *background = PetBagInfoImage(@"skill-up");
+    [background drawInRect:self.bounds fromRect:NSMakeRect(6, 6, 257, 97)
+                 operation:NSCompositingOperationSourceOver fraction:1.0 respectFlipped:YES hints:nil];
+    NSDictionary *nameStyle = @{NSFontAttributeName: [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold],
+                                NSForegroundColorAttributeName: NSColor.whiteColor};
+    NSDictionary *detailStyle = @{NSFontAttributeName: [NSFont systemFontOfSize:10],
+                                  NSForegroundColorAttributeName: [NSColor colorWithWhite:0.86 alpha:1]};
+    NSMutableParagraphStyle *right = [NSMutableParagraphStyle new]; right.alignment = NSTextAlignmentRight;
+    NSMutableDictionary *rightDetail = detailStyle.mutableCopy; rightDetail[NSParagraphStyleAttributeName] = right;
+    CGFloat nameWidth = 91;
+    if (self.typeIcon) {
+        NSSize size = self.typeIcon.size;
+        CGFloat scale = MIN(24.0 / size.width, 21.0 / size.height);
+        NSSize iconSize = NSMakeSize(size.width * scale, size.height * scale);
+        NSRect iconRect = NSMakeRect(NSWidth(self.bounds) - 8 - iconSize.width,
+            NSHeight(self.bounds) - iconSize.height - 2, iconSize.width, iconSize.height);
+        nameWidth = MAX(0, NSMinX(iconRect) - 12);
+        [self.typeIcon drawInRect:iconRect fromRect:NSZeroRect operation:NSCompositingOperationSourceOver
+                        fraction:1 respectFlipped:YES hints:nil];
+    }
+    [self.skillName ?: @"" drawInRect:NSMakeRect(8, 25, nameWidth, 17) withAttributes:nameStyle];
+    [[NSString stringWithFormat:@"威力:%@", self.powerText ?: @"--"]
+        drawInRect:NSMakeRect(8, 7, 54, 12) withAttributes:detailStyle];
+    [[NSString stringWithFormat:@"PP:%@", self.ppText ?: @"--/--"]
+        drawInRect:NSMakeRect(62, 7, 58, 12) withAttributes:rightDetail];
+}
+@end
+
+@interface AppDelegate : NSObject <NSApplicationDelegate, PetViewOwner>
 @property(nonatomic, strong) NSPanel *panel;
 @property(nonatomic, strong) PetView *petView;
 @property(nonatomic, strong) NSMutableArray<PetView *> *petViews;
 @property(nonatomic, strong) NSMutableArray<NSPanel *> *petPanels;
 @property(nonatomic, strong) NSWindow *managerWindow;
-@property(nonatomic, strong) NSTableView *managerTable;
+@property(nonatomic, strong) NSArray<NSButton *> *managerSlots;
+@property(nonatomic, strong) NSArray<NSButton *> *managerPageButtons;
+@property(nonatomic, strong) PetBagButton *managerFollowButton;
+@property(nonatomic, strong) NSImageView *managerPreview;
+@property(nonatomic, strong) NSTextField *managerDetail;
+@property(nonatomic, strong) NSArray<NSTextField *> *managerInfoLabels;
+@property(nonatomic, strong) NSTextField *managerFeatureLabel;
+@property(nonatomic, strong) NSImageView *managerTypeIcon;
+@property(nonatomic, strong) NSImageView *managerGenderIcon;
+@property(nonatomic, strong) NSButton *managerEvolutionButton;
+@property(nonatomic, strong) NSArray<NSTextField *> *managerStatLabels;
+@property(nonatomic, strong) NSArray<NSTextField *> *managerEVLabels;
+@property(nonatomic, strong) NSArray<PetBagSkillView *> *managerSkillViews;
+@property(nonatomic, strong) NSTextField *managerPageLabel;
+@property(nonatomic) NSInteger managerSelectedIndex;
+@property(nonatomic) NSInteger managerPage;
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, strong) NSProgressIndicator *conversionProgress;
 @property(nonatomic, strong) NSTextField *conversionStatus;
 @property(nonatomic) BOOL converting;
+- (void)updateManagerDetails;
+- (void)refreshManagerSlots;
 @end
 
 @implementation AppDelegate
@@ -904,12 +1122,11 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     NSString *instanceID = NSUUID.UUID.UUIDString;
     CGFloat size = [defaults doubleForKey:@"petSize"];
     if (![PetSizes() containsObject:@(size)]) size = 1.0;
-    NSDictionary *record = @{ @"id": instanceID, @"name": [NSString stringWithFormat:@"%@ 号精灵", petID],
-                              @"petID": petID, @"size": @(size),
+    NSDictionary *record = @{ @"id": instanceID, @"name": PetDefaultName(petID),
+                              @"petID": petID, @"size": @(size), @"createdAt": @(NSDate.date.timeIntervalSince1970),
+                              @"visible": @YES,
                               @"freeMovement": @([defaults boolForKey:@"freeMovement"]),
                               @"randomAttack": @([defaults boolForKey:@"randomAttack"]) };
-    NSDictionary *oldNames = [defaults dictionaryForKey:[NSString stringWithFormat:@"actionNames.%@", petID]];
-    if (oldNames) [defaults setObject:oldNames forKey:[NSString stringWithFormat:@"actionNames.instance.%@", instanceID]];
     [defaults setObject:@[record] forKey:PetInstancesKey];
     return @[record];
 }
@@ -921,12 +1138,16 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         NSRect frame = view.playingAction ? view.restingFrame : view.window.frame;
         [records addObject:@{ @"id": view.instanceID ?: NSUUID.UUID.UUIDString,
                               @"name": view.displayName ?: @"桌宠", @"petID": view.petID ?: @"1",
-                              @"size": @(view.sizeMultiplier), @"freeMovement": @(view.freeMovementEnabled),
+                              @"size": @(view.sizeMultiplier), @"visible": @(view.desktopVisible),
+                              @"createdAt": @(view.createdAt),
+                              @"skills": view.selectedSkillIDs ?: @[],
+                              @"freeMovement": @(view.freeMovementEnabled),
                               @"randomAttack": @(view.randomAttackEnabled),
                               @"x": @(NSMinX(frame)), @"y": @(NSMinY(frame)) }];
     }
     [NSUserDefaults.standardUserDefaults setObject:records forKey:PetInstancesKey];
-    [self.managerTable reloadData];
+    [self refreshManagerSlots];
+    [self updateManagerDetails];
 }
 
 - (NSURL *)readyResourceForPetID:(NSString *)petID {
@@ -936,6 +1157,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@"frames"] path]];
     BOOL needsUpgrade = hasFrames &&
         (![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".walk-scan-v2"] path]] ||
+         ![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".bag-front-v1"] path]] ||
          ![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".raster-v3"] path]] ||
          ![NSFileManager.defaultManager fileExistsAtPath:
              [[[resourceURL URLByAppendingPathComponent:@"frames"] URLByAppendingPathComponent:@".layout-v1.plist"] path]]);
@@ -970,7 +1192,12 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
                                           NSMidY(visible) - side / 2.0 - offset)];
     }
     [self.petViews addObject:view]; [self.petPanels addObject:panel];
-    [panel orderFront:nil];
+    if (view.desktopVisible) [panel orderFront:nil];
+    else {
+        [view.timer invalidate]; view.timer = nil;
+        [view.movementTimer invalidate]; view.movementTimer = nil;
+        [view.randomAttackTimer invalidate]; view.randomAttackTimer = nil;
+    }
     return view;
 }
 
@@ -1195,12 +1422,63 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     }
 }
 
+- (BOOL)installBagFrontForPetID:(NSString *)petID
+                  intoFramesURL:(NSURL *)framesURL
+                   temporaryURL:(NSURL *)temporaryURL {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSURL *destination = [[framesURL URLByAppendingPathComponent:@"bag-front"]
+                          URLByAppendingPathComponent:@"1.png"];
+    if ([fm fileExistsAtPath:destination.path]) return YES;
+
+    NSURL *swf = [temporaryURL URLByAppendingPathComponent:@"bag-front.swf"];
+    NSString *relativePath = [NSString stringWithFormat:@"groupFightResource/pet/%@.swf", petID];
+    NSURL *localResource = [[NSURL fileURLWithPath:NSHomeDirectory()]
+        URLByAppendingPathComponent:[@"Library/Application Support/seer-game/serverFile/resource"
+                                     stringByAppendingPathComponent:relativePath]];
+    if ([fm fileExistsAtPath:localResource.path]) {
+        if (![fm copyItemAtURL:localResource toURL:swf error:nil]) return NO;
+    } else {
+        NSData *data = [NSData dataWithContentsOfURL:[NSURL URLWithString:
+            [@"https://seer.61.com/resource/" stringByAppendingString:relativePath]]];
+        if (data.length < 4 || ![data writeToURL:swf atomically:YES]) return NO;
+    }
+
+    NSURL *symbols = [temporaryURL URLByAppendingPathComponent:@"bag-front-symbols"];
+    [fm createDirectoryAtURL:symbols withIntermediateDirectories:YES attributes:nil error:nil];
+    if (![self runFFDec:@[@"-export", @"symbolClass", symbols.path, swf.path]]) return NO;
+    NSString *csv = [NSString stringWithContentsOfURL:[symbols URLByAppendingPathComponent:@"symbols.csv"]
+                                              encoding:NSUTF8StringEncoding error:nil];
+    NSInteger spriteID = -1;
+    for (NSString *line in [csv componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        if (![line containsString:@"\"pet\""]) continue;
+        spriteID = line.integerValue; break;
+    }
+    if (spriteID <= 0) return NO;
+
+    NSURL *exportURL = [temporaryURL URLByAppendingPathComponent:@"bag-front-export"];
+    [fm createDirectoryAtURL:exportURL withIntermediateDirectories:YES attributes:nil error:nil];
+    if (![self runFFDec:@[@"-selectid", @(spriteID).stringValue, @"-ignorebackground", @"-zoom", @"4",
+                          @"-format", @"sprite:png", @"-export", @"sprite", exportURL.path, swf.path]]) return NO;
+    NSString *prefix = [NSString stringWithFormat:@"DefineSprite_%ld", (long)spriteID];
+    NSURL *spriteDirectory = [[fm contentsOfDirectoryAtURL:exportURL includingPropertiesForKeys:nil
+                                                    options:0 error:nil]
+        filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSURL *url, NSDictionary *_) {
+            return [url.lastPathComponent hasPrefix:prefix];
+        }]].firstObject;
+    NSURL *source = [spriteDirectory URLByAppendingPathComponent:@"1.png"];
+    if (![fm fileExistsAtPath:source.path]) return NO;
+    [fm createDirectoryAtURL:destination.URLByDeletingLastPathComponent
+  withIntermediateDirectories:YES attributes:nil error:nil];
+    return [fm copyItemAtURL:source toURL:destination error:nil];
+}
+
 - (NSURL *)installPetID:(NSString *)petID error:(NSError **)error {
     [self reportConversionProgress:2 status:@"检查本地缓存…"];
     NSURL *cached = [self cachedPetURL:petID];
     [self installIdleForPetID:petID intoPetURL:cached];
     NSURL *idleScanMarker = [cached URLByAppendingPathComponent:@".idle-scan-v1"];
     NSURL *walkScanMarker = [cached URLByAppendingPathComponent:@".walk-scan-v2"];
+    NSURL *bagFrontMarker = [cached URLByAppendingPathComponent:@".bag-front-v1"];
     NSURL *rasterMarker = [cached URLByAppendingPathComponent:@".raster-v3"];
     if ([[NSFileManager defaultManager] fileExistsAtPath:[[cached URLByAppendingPathComponent:@"frames"] path]] &&
         [[NSFileManager defaultManager] fileExistsAtPath:idleScanMarker.path] &&
@@ -1230,6 +1508,16 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
                 }]) {
                     SetError(error, @"动作位置分析失败"); return nil;
                 }
+            }
+            if (![NSFileManager.defaultManager fileExistsAtPath:bagFrontMarker.path]) {
+                [self reportConversionProgress:99 status:@"提取背包正面形象…"];
+                NSURL *temp = [NSURL fileURLWithPath:[NSTemporaryDirectory()
+                    stringByAppendingPathComponent:NSUUID.UUID.UUIDString]];
+                [NSFileManager.defaultManager createDirectoryAtURL:temp withIntermediateDirectories:YES
+                                                         attributes:nil error:nil];
+                if ([self installBagFrontForPetID:petID intoFramesURL:framesURL temporaryURL:temp])
+                    [NSData.data writeToURL:bagFrontMarker atomically:YES];
+                [NSFileManager.defaultManager removeItemAtURL:temp error:nil];
             }
             [self reportConversionProgress:100 status:@"缓存准备完成"];
             return cached;
@@ -1349,6 +1637,8 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     }
     [self reportConversionProgress:80 status:@"提取左右移动动作…"];
     [self installWalkFramesForPetID:petID intoFramesURL:stagedFrames temporaryURL:temp];
+    [self reportConversionProgress:82 status:@"提取背包正面形象…"];
+    BOOL hasBagFront = [self installBagFrontForPetID:petID intoFramesURL:stagedFrames temporaryURL:temp];
     [self reportConversionProgress:85 status:@"优化帧尺寸和内存占用…"];
     if (!NormalizeFramesAtURL(stagedFrames, exportScales, ^(double fraction) {
         [self reportConversionProgress:85 + fraction * 12 status:@"优化帧尺寸和内存占用…"];
@@ -1364,6 +1654,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     }
     [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".idle-scan-v1"] atomically:YES];
     [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".walk-scan-v2"] atomically:YES];
+    if (hasBagFront) [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".bag-front-v1"] atomically:YES];
     [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".raster-v3"] atomically:YES];
     [fm createDirectoryAtURL:cached.URLByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
     [fm removeItemAtURL:cached error:nil];
@@ -1438,6 +1729,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     if (!petURL || ![target loadFramesFromURL:petURL petID:petID]) {
         [self showError:conversionError.localizedDescription ?: @"提取出的动作帧无法播放"]; return;
     }
+    [target resetDefaultSkills];
     [self savePetInstances]; [target play:@"sa"];
 }
 
@@ -1455,30 +1747,35 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     NSAlert *alert = [NSAlert new]; alert.messageText = title;
     alert.informativeText = @"每个桌宠的名称、形象和行为设置彼此独立。";
     [alert addButtonWithTitle:@"保存"]; [alert addButtonWithTitle:@"取消"];
-    NSView *form = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 340, 150)];
-    NSTextField *name = [[NSTextField alloc] initWithFrame:NSMakeRect(92, 118, 248, 24)];
-    name.stringValue = view.displayName ?: @"新桌宠";
-    NSTextField *petID = [[NSTextField alloc] initWithFrame:NSMakeRect(92, 86, 248, 24)];
-    petID.stringValue = view.petID ?: @"1";
-    NSPopUpButton *size = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(92, 54, 120, 26)];
+    NSView *form = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 340, 176)];
+    NSString *initialID = view.petID ?: @"1";
+    NSTextField *name = [[NSTextField alloc] initWithFrame:NSMakeRect(92, 144, 248, 24)];
+    name.stringValue = view.displayName ?: PetDefaultName(initialID);
+    NSTextField *petID = [[NSTextField alloc] initWithFrame:NSMakeRect(92, 112, 248, 24)];
+    petID.stringValue = initialID;
+    NSPopUpButton *size = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(92, 80, 120, 26)];
     for (NSNumber *value in PetSizes())
         [size addItemWithTitle:[NSString stringWithFormat:@"%g×", value.doubleValue]];
     CGFloat selectedSize = view ? view.sizeMultiplier : 1.0;
     [size selectItemWithTitle:[NSString stringWithFormat:@"%g×", selectedSize]];
     NSButton *movement = [NSButton checkboxWithTitle:@"自由移动" target:nil action:nil];
-    movement.frame = NSMakeRect(92, 26, 110, 22); movement.state = view.freeMovementEnabled;
+    movement.frame = NSMakeRect(92, 52, 110, 22); movement.state = view.freeMovementEnabled;
     NSButton *random = [NSButton checkboxWithTitle:@"每 8 秒随机攻击" target:nil action:nil];
-    random.frame = NSMakeRect(205, 26, 135, 22); random.state = view.randomAttackEnabled;
+    random.frame = NSMakeRect(205, 52, 135, 22); random.state = view.randomAttackEnabled;
+    NSButton *visible = [NSButton checkboxWithTitle:@"显示在桌面" target:nil action:nil];
+    visible.frame = NSMakeRect(92, 22, 120, 22);
+    visible.state = !view || view.desktopVisible ? NSControlStateValueOn : NSControlStateValueOff;
     NSArray *labels = @[@"名称", @"精灵编号", @"大小"];
     for (NSUInteger i = 0; i < labels.count; i++) {
         NSTextField *label = [NSTextField labelWithString:labels[i]];
-        label.frame = NSMakeRect(0, 120 - i * 32, 82, 22); label.alignment = NSTextAlignmentRight;
+        label.frame = NSMakeRect(0, 146 - i * 32, 82, 22); label.alignment = NSTextAlignmentRight;
         [form addSubview:label];
     }
-    for (NSView *control in @[name, petID, size, movement, random]) [form addSubview:control];
-    alert.accessoryView = form; alert.window.initialFirstResponder = name;
+    for (NSView *control in @[name, petID, size, movement, random, visible]) [form addSubview:control];
+    NSTextField *firstField = view ? name : petID;
+    alert.accessoryView = form; alert.window.initialFirstResponder = firstField;
     NSTimer *focusTimer = [NSTimer timerWithTimeInterval:0 repeats:NO block:^(__unused NSTimer *timer) {
-        [alert.window makeFirstResponder:name]; [name selectText:nil];
+        [alert.window makeFirstResponder:firstField]; [firstField selectText:nil];
     }];
     [NSRunLoop.mainRunLoop addTimer:focusTimer forMode:NSModalPanelRunLoopMode];
     if ([alert runModal] != NSAlertFirstButtonReturn) return nil;
@@ -1486,6 +1783,8 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
                              NSCharacterSet.whitespaceAndNewlineCharacterSet];
     NSString *trimmedID = [petID.stringValue stringByTrimmingCharactersInSet:
                            NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!view && [trimmedName isEqualToString:PetDefaultName(initialID)])
+        trimmedName = PetDefaultName(trimmedID);
     if (trimmedName.length == 0 || trimmedID.length == 0 ||
         [trimmedID rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location != NSNotFound ||
         trimmedID.integerValue <= 0) {
@@ -1493,13 +1792,82 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     }
     CGFloat sizeValue = [PetSizes()[size.indexOfSelectedItem] doubleValue];
     return @{ @"name": trimmedName, @"petID": trimmedID, @"size": @(sizeValue),
+              @"visible": @(visible.state == NSControlStateValueOn),
               @"freeMovement": @(movement.state == NSControlStateValueOn),
               @"randomAttack": @(random.state == NSControlStateValueOn) };
 }
 
 - (PetView *)selectedManagedPet {
-    NSInteger row = self.managerTable.selectedRow;
-    return row >= 0 && row < (NSInteger)self.petViews.count ? self.petViews[row] : nil;
+    NSInteger index = self.managerSelectedIndex;
+    return index >= 0 && index < (NSInteger)self.petViews.count ? self.petViews[index] : nil;
+}
+
+- (void)selectManagerSlot:(NSButton *)sender {
+    if (sender.tag < 0 || sender.tag >= (NSInteger)self.petViews.count) return;
+    self.managerSelectedIndex = sender.tag;
+    [self refreshManagerSlots]; [self updateManagerDetails];
+}
+
+- (void)showPreviousManagerPage:(id)sender {
+    if (self.managerPage <= 0) return;
+    self.managerPage--; self.managerSelectedIndex = self.managerPage * 6;
+    [self refreshManagerSlots]; [self updateManagerDetails];
+}
+
+- (void)showNextManagerPage:(id)sender {
+    NSInteger pages = MAX(1, ((NSInteger)self.petViews.count + 5) / 6);
+    if (self.managerPage + 1 >= pages) return;
+    self.managerPage++; self.managerSelectedIndex = self.managerPage * 6;
+    [self refreshManagerSlots]; [self updateManagerDetails];
+}
+
+- (void)refreshManagerSlots {
+    if (self.managerSlots.count == 0) return;
+    NSInteger pages = MAX(1, ((NSInteger)self.petViews.count + 5) / 6);
+    self.managerPage = MIN(MAX(0, self.managerPage), pages - 1);
+    if (self.managerSelectedIndex >= (NSInteger)self.petViews.count)
+        self.managerSelectedIndex = MAX(0, (NSInteger)self.petViews.count - 1);
+    for (NSInteger slot = 0; slot < 6; slot++) {
+        PetBagSlotButton *button = (PetBagSlotButton *)self.managerSlots[slot];
+        NSInteger index = self.managerPage * 6 + slot;
+        button.tag = index; button.hidden = NO; button.occupied = index < (NSInteger)self.petViews.count;
+        button.enabled = button.occupied;
+        if (!button.occupied) {
+            button.petImage = nil; button.petName = nil; button.petNumber = nil;
+            button.primarySlot = NO; button.selectedSlot = NO; button.petShown = NO;
+            button.toolTip = nil; [button setNeedsDisplay:YES]; continue;
+        }
+        PetView *view = self.petViews[index];
+        button.petImage = view.bagImage ?: view.idleImage;
+        button.petName = view.displayName; button.petNumber = view.petID;
+        button.primarySlot = index == 0; button.selectedSlot = index == self.managerSelectedIndex;
+        button.petShown = view.desktopVisible; [button setNeedsDisplay:YES];
+        button.toolTip = [NSString stringWithFormat:@"%@（%@号）", view.displayName, view.petID];
+    }
+    self.managerPageLabel.stringValue = [NSString stringWithFormat:@"%ld / %ld",
+        (long)self.managerPage + 1, (long)pages];
+    self.managerPageLabel.hidden = pages == 1;
+    if (self.managerPageButtons.count == 2) {
+        self.managerPageButtons[0].hidden = pages == 1;
+        self.managerPageButtons[1].hidden = pages == 1;
+        self.managerPageButtons[0].enabled = self.managerPage > 0;
+        self.managerPageButtons[1].enabled = self.managerPage + 1 < pages;
+    }
+}
+
+- (void)setPetView:(PetView *)view desktopVisible:(BOOL)visible {
+    view.desktopVisible = visible;
+    if (visible) {
+        [view startIdlePlayback]; [view updateMovementTimer]; [view updateRandomAttackTimer];
+        [view.window orderFront:nil];
+    } else {
+        if (view.playingAction) [view restoreIdleWindow];
+        [view startIdlePlayback];
+        [view.timer invalidate]; view.timer = nil;
+        [view.movementTimer invalidate]; view.movementTimer = nil;
+        [view.randomAttackTimer invalidate]; view.randomAttackTimer = nil;
+        [view.window orderOut:nil];
+    }
 }
 
 - (void)addManagedPet:(id)sender {
@@ -1510,9 +1878,9 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     NSMutableDictionary *record = values.mutableCopy; record[@"id"] = NSUUID.UUID.UUIDString;
     PetView *view = [self addPetFromRecord:record resourceURL:url];
     if (!view) { [self showError:@"无法加载这个精灵的动作帧"]; return; }
+    self.managerSelectedIndex = self.petViews.count - 1;
+    self.managerPage = self.managerSelectedIndex / 6;
     [self savePetInstances];
-    [self.managerTable selectRowIndexes:[NSIndexSet indexSetWithIndex:self.petViews.count - 1]
-                   byExtendingSelection:NO];
 }
 
 - (void)editManagedPet:(id)sender {
@@ -1525,6 +1893,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         if (!url || ![view loadFramesFromURL:url petID:newPetID]) {
             [self showError:error.localizedDescription ?: @"无法加载这个精灵的动作帧"]; return;
         }
+        [view resetDefaultSkills];
     }
     view.displayName = values[@"name"];
     CGFloat newSize = [values[@"size"] doubleValue];
@@ -1534,6 +1903,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     view.freeMovementEnabled = [values[@"freeMovement"] boolValue]; [view updateMovementTimer];
     view.randomAttackEnabled = [values[@"randomAttack"] boolValue]; [view updateRandomAttackTimer];
     if (!view.freeMovementEnabled) [view startIdlePlayback];
+    [self setPetView:view desktopVisible:[values[@"visible"] boolValue]];
     [self savePetInstances];
 }
 
@@ -1543,56 +1913,318 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     NSUInteger index = [self.petViews indexOfObjectIdenticalTo:view];
     [view.timer invalidate]; [view.movementTimer invalidate]; [view.randomAttackTimer invalidate];
     [self.petPanels[index] orderOut:nil];
-    [NSUserDefaults.standardUserDefaults removeObjectForKey:view.actionNamesDefaultsKey];
     [self.petViews removeObjectAtIndex:index]; [self.petPanels removeObjectAtIndex:index];
     self.petView = self.petViews.firstObject; self.panel = self.petPanels.firstObject;
+    self.managerSelectedIndex = MIN((NSInteger)index, (NSInteger)self.petViews.count - 1);
+    self.managerPage = self.managerSelectedIndex / 6;
     [self savePetInstances];
-    NSInteger next = MIN((NSInteger)index, (NSInteger)self.petViews.count - 1);
-    [self.managerTable selectRowIndexes:[NSIndexSet indexSetWithIndex:next] byExtendingSelection:NO];
 }
 
-- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView { return self.petViews.count; }
-- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)column row:(NSInteger)row {
-    PetView *view = self.petViews[row]; NSString *value = @"";
-    if ([column.identifier isEqualToString:@"name"]) value = view.displayName;
-    else if ([column.identifier isEqualToString:@"petID"]) value = view.petID;
-    else if ([column.identifier isEqualToString:@"size"]) value = [NSString stringWithFormat:@"%g×", view.sizeMultiplier];
-    else value = [NSString stringWithFormat:@"%@ / %@", view.freeMovementEnabled ? @"移动" : @"静止",
-                  view.randomAttackEnabled ? @"随机攻击" : @"不攻击"];
-    NSTextField *label = [NSTextField labelWithString:value ?: @""];
-    label.lineBreakMode = NSLineBreakByTruncatingTail; return label;
+- (void)updateManagerDetails {
+    PetView *view = [self selectedManagedPet];
+    self.managerPreview.image = view.bagImage ?: view.idleImage;
+    NSArray *metadata = view ? PetMetadata(view.petID) : nil;
+    NSNumber *typeID = metadata.count > 0 ? metadata[0] : @0;
+    NSString *typeName = view ? PetTypeName(typeID) : @"";
+    NSInteger gender = metadata.count > 1 ? [metadata[1] integerValue] : 0;
+    NSArray<NSString *> *labels = @[@"序号:", @"名字:", @"等级:", @"升级所需经验值:", @"性格:", @"获得时间:"];
+    NSDateFormatter *dateFormatter = [NSDateFormatter new]; dateFormatter.dateFormat = @"yyyy-M-d";
+    NSString *createdDate = view ? [dateFormatter stringFromDate:
+        [NSDate dateWithTimeIntervalSince1970:view.createdAt]] : @"";
+    NSArray<NSString *> *values = view ? @[
+        [NSString stringWithFormat:@"%03ld", (long)view.petID.integerValue], view.displayName,
+        @"--", @"--", @"--", createdDate
+    ] : @[@"", @"", @"", @"", @"", @""];
+    for (NSUInteger i = 0; i < self.managerInfoLabels.count; i++)
+        self.managerInfoLabels[i].attributedStringValue = PetBagFieldText(labels[i], values[i]);
+    self.managerInfoLabels[1].toolTip = view ? [NSString stringWithFormat:@"%@ · 属性：%@", view.displayName, typeName] : nil;
+    NSImage *typeIcon = view ? PetTypeIcon(typeID) : nil;
+    self.managerTypeIcon.image = typeIcon;
+    self.managerTypeIcon.toolTip = view ? [NSString stringWithFormat:@"属性：%@", typeName] : nil;
+    NSSize sourceSize = typeIcon.size;
+    CGFloat typeScale = typeIcon ? MIN(30.0 / sourceSize.width, 24.0 / sourceSize.height) : 0;
+    NSSize typeSize = NSMakeSize(sourceSize.width * typeScale, sourceSize.height * typeScale);
+    NSRect nameFrame = self.managerInfoLabels[1].frame;
+    CGFloat reservedWidth = 6 + typeSize.width + (gender > 0 ? 24 : 0);
+    CGFloat availableNameWidth = MAX(40, 600 - NSMinX(nameFrame) - reservedWidth);
+    nameFrame.size.width = MIN(availableNameWidth,
+        ceil(self.managerInfoLabels[1].attributedStringValue.size.width) + 6);
+    self.managerInfoLabels[1].frame = nameFrame;
+    CGFloat typeX = NSMaxX(nameFrame) + 6;
+    self.managerTypeIcon.frame = NSMakeRect(typeX, 289 - typeSize.height / 2, typeSize.width, typeSize.height);
+    self.managerGenderIcon.image = gender > 0 ? PetGenderIcon(MIN(gender, 2)) : nil;
+    self.managerGenderIcon.frame = NSMakeRect(NSMaxX(self.managerTypeIcon.frame) + 6, 279, 18, 20);
+    self.managerGenderIcon.hidden = !view || gender == 0;
+    self.managerGenderIcon.toolTip = gender == 1 ? @"雄性" : (gender == 2 ? @"雌性" : nil);
+    NSInteger evolvesTo = metadata.count > 2 ? [metadata[2] integerValue] : 0;
+    NSInteger evolvingLv = metadata.count > 3 ? [metadata[3] integerValue] : 0;
+    NSInteger evolvFlag = metadata.count > 4 ? [metadata[4] integerValue] : 0;
+    if (!view) self.managerEvolutionButton.toolTip = nil;
+    else if (evolvesTo > 0) self.managerEvolutionButton.toolTip = [NSString stringWithFormat:@"%ld级进化为%@",
+        (long)evolvingLv, PetDefaultName([NSString stringWithFormat:@"%ld", (long)evolvesTo])];
+    else if (evolvFlag > 0) self.managerEvolutionButton.toolTip = evolvingLv > 0 ?
+        [NSString stringWithFormat:@"%ld级在实验室进化舱进化", (long)evolvingLv] : @"可在实验室进化舱进化";
+    else self.managerEvolutionButton.toolTip = @"已是最终形态";
+    self.managerFeatureLabel.attributedStringValue = PetBagFieldText(@"特性:", view ? @"--" : @"");
+    NSArray<NSNumber *> *baseStats = view ? PetBaseStats(view.petID) : nil;
+    NSArray<NSString *> *statNames = @[@"攻击", @"防御", @"特攻", @"特防", @"速度", @"体力"];
+    NSMutableArray<NSString *> *stats = [NSMutableArray arrayWithCapacity:6];
+    for (NSUInteger i = 0; i < 6; i++) {
+        NSString *value = i < baseStats.count ? baseStats[i].stringValue : @"--";
+        [stats addObject:view ? [NSString stringWithFormat:@"%@:%@", statNames[i], value] : @""];
+    }
+    for (NSUInteger i = 0; i < self.managerStatLabels.count; i++)
+        self.managerStatLabels[i].stringValue = stats[i];
+    for (NSTextField *label in self.managerEVLabels) label.stringValue = view ? @"0" : @"";
+    for (NSUInteger i = 0; i < self.managerSkillViews.count; i++) {
+        PetBagSkillView *skillView = self.managerSkillViews[i];
+        NSNumber *skillID = view && i < view.selectedSkillIDs.count ? view.selectedSkillIDs[i] : nil;
+        NSArray *info = skillID ? PetMoveInfo(skillID) : nil;
+        skillView.skillID = skillID;
+        skillView.skillName = info.count > 0 ? info[0] : @"";
+        skillView.powerText = info.count > 1 ? [info[1] stringValue] : @"--";
+        skillView.ppText = info.count > 2 ? [NSString stringWithFormat:@"%@/%@", info[2], info[2]] : @"--/--";
+        skillView.typeName = info.count > 4 ? PetTypeName(info[4]) : @"";
+        NSInteger category = info.count > 3 ? [info[3] integerValue] : 0;
+        skillView.typeIcon = info.count > 4 ? (category == 4 ? PetTypeIconNamed(@"prop") : PetTypeIcon(info[4])) : nil;
+        NSString *categoryName = category == 1 ? @"物理攻击" : (category == 2 ? @"特殊攻击" :
+            (category == 4 ? @"属性攻击" : @"技能"));
+        NSString *detail = info.count > 5 ? info[5] : @"";
+        skillView.toolTip = info ? [NSString stringWithFormat:@"%@ · %@ · %@%@",
+            skillView.typeName, categoryName, detail.length ? detail : @"点击更换技能",
+            detail.length ? @"（点击更换技能）" : @""] : @"点击更换技能";
+    }
+    if (view && self.managerFollowButton) {
+        NSString *name = view.desktopVisible ? @"follow-hide" : @"follow-show";
+        [self.managerFollowButton setUpImage:PetBagButtonImage(name, @"up")
+                                  overImage:PetBagButtonImage(name, @"over")];
+        self.managerFollowButton.toolTip = view.desktopVisible ? @"收回包内" : @"身边跟随";
+    }
 }
+
+- (void)toggleManagedPetVisibility:(id)sender {
+    PetView *view = [self selectedManagedPet]; if (!view) return;
+    [self setPetView:view desktopVisible:!view.desktopVisible]; [self savePetInstances];
+}
+
+- (void)makeManagedPetPrimary:(id)sender {
+    PetView *view = [self selectedManagedPet]; if (!view) return;
+    NSUInteger index = [self.petViews indexOfObjectIdenticalTo:view];
+    if (index > 0) {
+        NSPanel *panel = self.petPanels[index];
+        [self.petViews removeObjectAtIndex:index]; [self.petPanels removeObjectAtIndex:index];
+        [self.petViews insertObject:view atIndex:0]; [self.petPanels insertObject:panel atIndex:0];
+    }
+    self.petView = view; self.panel = self.petPanels.firstObject; self.managerSelectedIndex = 0; self.managerPage = 0;
+    [self savePetInstances];
+}
+
+- (void)restoreManagedPet:(id)sender {
+    PetView *view = [self selectedManagedPet]; if (!view) return;
+    if (view.playingAction) [view restoreIdleWindow];
+    [view startIdlePlayback];
+    NSScreen *screen = view.window.screen ?: NSScreen.mainScreen; NSRect area = screen.visibleFrame;
+    [view.window setFrameOrigin:NSMakePoint(NSMidX(area) - NSWidth(view.window.frame) / 2.0,
+                                            NSMidY(area) - NSHeight(view.window.frame) / 2.0)];
+    view.restingFrame = view.window.frame; [self savePetInstances];
+}
+
+- (void)toggleManagedPetRandomAttack:(id)sender {
+    PetView *view = [self selectedManagedPet]; if (!view) return;
+    view.randomAttackEnabled = !view.randomAttackEnabled; [view updateRandomAttackTimer];
+    [self savePetInstances];
+}
+
+- (void)replaceManagedPetSkills:(id)sender {
+    PetView *view = [sender isKindOfClass:NSMenuItem.class] ? [sender representedObject] : [self selectedManagedPet];
+    if (!view) return;
+    NSArray *metadata = PetMetadata(view.petID), *moves = metadata.count > 5 ? metadata[5] : @[];
+    if (moves.count == 0) { [self showError:@"这个编号没有可用的技能配置"]; return; }
+    NSUInteger slotCount = MIN(4, moves.count);
+    NSAlert *alert = [NSAlert new]; alert.messageText = [NSString stringWithFormat:@"%@ · 更换技能", view.displayName];
+    alert.informativeText = @"从原版已学技能中选择最多四个携带技能，同一技能不能重复。";
+    [alert addButtonWithTitle:@"保存"]; [alert addButtonWithTitle:@"取消"];
+    NSView *form = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 390, slotCount * 36)];
+    NSMutableArray<NSPopUpButton *> *popups = [NSMutableArray arrayWithCapacity:slotCount];
+    for (NSUInteger slot = 0; slot < slotCount; slot++) {
+        CGFloat y = (slotCount - slot - 1) * 36;
+        NSTextField *label = [NSTextField labelWithString:[NSString stringWithFormat:@"技能 %lu", slot + 1]];
+        label.frame = NSMakeRect(0, y + 3, 55, 22); label.alignment = NSTextAlignmentRight;
+        NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(64, y, 326, 26) pullsDown:NO];
+        for (NSArray *move in moves) {
+            NSNumber *skillID = move[0]; NSArray *info = PetMoveInfo(skillID);
+            NSString *title = [NSString stringWithFormat:@"%@  Lv.%@  %@  威力%@",
+                info.count ? info[0] : [@"技能" stringByAppendingString:skillID.stringValue], move[1],
+                info.count > 4 ? PetTypeName(info[4]) : @"--", info.count > 1 ? info[1] : @"--"];
+            [popup addItemWithTitle:title]; popup.lastItem.representedObject = skillID;
+        }
+        NSNumber *selected = slot < view.selectedSkillIDs.count ? view.selectedSkillIDs[slot] : nil;
+        for (NSMenuItem *item in popup.itemArray)
+            if ([item.representedObject isEqual:selected]) { [popup selectItem:item]; break; }
+        [form addSubview:label]; [form addSubview:popup]; [popups addObject:popup];
+    }
+    alert.accessoryView = form;
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    NSMutableArray<NSNumber *> *selected = [NSMutableArray arrayWithCapacity:slotCount];
+    for (NSPopUpButton *popup in popups) [selected addObject:popup.selectedItem.representedObject];
+    if ([NSSet setWithArray:selected].count != selected.count) { [self showError:@"同一技能不能重复携带"]; return; }
+    view.selectedSkillIDs = selected; [self savePetInstances];
+}
+
+- (void)closePetManager:(id)sender { [self.managerWindow performClose:nil]; }
 
 - (void)showPetManager:(id)sender {
     if (!self.managerWindow) {
-        self.managerWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 330)
+        self.managerWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 612, 329)
             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
             backing:NSBackingStoreBuffered defer:NO];
         self.managerWindow.title = @"赛尔号桌宠管理"; self.managerWindow.releasedWhenClosed = NO;
+        self.managerWindow.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+            NSWindowCollectionBehaviorFullScreenAuxiliary;
         NSView *content = self.managerWindow.contentView;
-        NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(16, 58, 528, 256)];
-        scroll.hasVerticalScroller = YES; scroll.borderType = NSBezelBorder;
-        self.managerTable = [[NSTableView alloc] initWithFrame:scroll.bounds];
-        NSArray *columns = @[@[@"name", @"名称", @150], @[@"petID", @"编号", @70],
-                             @[@"size", @"大小", @60], @[@"state", @"状态", @220]];
-        for (NSArray *info in columns) {
-            NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:info[0]];
-            column.title = info[1]; column.width = [info[2] doubleValue]; [self.managerTable addTableColumn:column];
+        content.wantsLayer = YES; content.layer.backgroundColor = [NSColor colorWithRed:0.02 green:0.11 blue:0.25 alpha:1].CGColor;
+        NSImageView *background = [[NSImageView alloc] initWithFrame:NSMakeRect(-204, -132, 974, 574)];
+        background.image = [NSBundle.mainBundle imageForResource:@"PetBagLegacy"];
+        background.imageScaling = NSImageScaleNone; [content addSubview:background];
+        NSView *infoBacking = [[NSView alloc] initWithFrame:NSMakeRect(312, 5, 291, 314)];
+        infoBacking.wantsLayer = YES;
+        infoBacking.layer.backgroundColor = [NSColor colorWithRed:0 green:0.10 blue:0.27 alpha:1].CGColor;
+        [content addSubview:infoBacking];
+        NSImageView *infoPanel = [[NSImageView alloc] initWithFrame:NSMakeRect(306, 3, 303, 333)];
+        infoPanel.image = PetBagInfoImage(@"panel"); infoPanel.imageScaling = NSImageScaleAxesIndependently;
+        [content addSubview:infoPanel];
+        NSView *effectCover = [[NSView alloc] initWithFrame:NSMakeRect(496, 208, 105, 31)];
+        effectCover.wantsLayer = YES;
+        effectCover.layer.backgroundColor = [NSColor colorWithRed:0 green:0.10 blue:0.27 alpha:1].CGColor;
+        [content addSubview:effectCover];
+
+        NSMutableArray *slots = [NSMutableArray arrayWithCapacity:6];
+        for (NSInteger slot = 0; slot < 6; slot++) {
+            NSInteger column = slot % 2, row = slot / 2;
+            PetBagSlotButton *button = [[PetBagSlotButton alloc] initWithFrame:
+                NSMakeRect(20 + column * 132, 47 + (2 - row) * 73, 126, 73)];
+            button.target = self; button.action = @selector(selectManagerSlot:); button.bordered = NO;
+            button.toolTip = @"选择桌宠"; [content addSubview:button]; [slots addObject:button];
         }
-        self.managerTable.dataSource = self; self.managerTable.delegate = self;
-        self.managerTable.doubleAction = @selector(editManagedPet:); self.managerTable.target = self;
-        scroll.documentView = self.managerTable; [content addSubview:scroll];
-        NSButton *add = [NSButton buttonWithTitle:@"增加" target:self action:@selector(addManagedPet:)];
-        NSButton *edit = [NSButton buttonWithTitle:@"编辑" target:self action:@selector(editManagedPet:)];
-        NSButton *remove = [NSButton buttonWithTitle:@"删除" target:self action:@selector(removeManagedPet:)];
-        add.frame = NSMakeRect(16, 16, 80, 30); edit.frame = NSMakeRect(104, 16, 80, 30);
-        remove.frame = NSMakeRect(192, 16, 80, 30);
-        [content addSubview:add]; [content addSubview:edit]; [content addSubview:remove];
+        self.managerSlots = slots;
+
+        NSButton *previous = [NSButton buttonWithTitle:@"◀" target:self action:@selector(showPreviousManagerPage:)];
+        NSButton *next = [NSButton buttonWithTitle:@"▶" target:self action:@selector(showNextManagerPage:)];
+        previous.frame = NSMakeRect(17, 280, 28, 24); next.frame = NSMakeRect(82, 280, 28, 24);
+        previous.bordered = NO; next.bordered = NO;
+        previous.contentTintColor = NSColor.whiteColor; next.contentTintColor = NSColor.whiteColor;
+        self.managerPageLabel = [NSTextField labelWithString:@"1 / 1"];
+        self.managerPageLabel.frame = NSMakeRect(45, 283, 38, 18);
+        self.managerPageLabel.textColor = NSColor.whiteColor; self.managerPageLabel.alignment = NSTextAlignmentCenter;
+        self.managerPageButtons = @[previous, next];
+        [content addSubview:previous]; [content addSubview:self.managerPageLabel]; [content addSubview:next];
+
+        self.managerPreview = [[NSImageView alloc] initWithFrame:NSMakeRect(324, 191, 100, 120)];
+        self.managerPreview.imageScaling = NSImageScaleProportionallyDown;
+        self.managerPreview.imageAlignment = NSImageAlignCenter; [content addSubview:self.managerPreview];
+        NSMutableArray *infoLabels = [NSMutableArray arrayWithCapacity:6];
+        NSArray<NSValue *> *infoFrames = @[
+            [NSValue valueWithRect:NSMakeRect(438, 304, 150, 18)],
+            [NSValue valueWithRect:NSMakeRect(438, 282, 102, 18)],
+            [NSValue valueWithRect:NSMakeRect(438, 260, 72, 18)],
+            [NSValue valueWithRect:NSMakeRect(438, 238, 150, 18)],
+            [NSValue valueWithRect:NSMakeRect(438, 216, 72, 18)],
+            [NSValue valueWithRect:NSMakeRect(438, 194, 150, 18)]
+        ];
+        for (NSInteger i = 0; i < 6; i++) {
+            NSTextField *label = [NSTextField labelWithString:@""];
+            label.frame = infoFrames[i].rectValue;
+            label.textColor = NSColor.whiteColor; label.lineBreakMode = NSLineBreakByTruncatingTail;
+            label.font = [NSFont systemFontOfSize:14];
+            [content addSubview:label]; [infoLabels addObject:label];
+        }
+        self.managerInfoLabels = infoLabels; self.managerDetail = infoLabels[1];
+        self.managerFeatureLabel = [NSTextField labelWithString:@""];
+        self.managerFeatureLabel.frame = NSMakeRect(508, 260, 94, 18);
+        [content addSubview:self.managerFeatureLabel];
+        self.managerTypeIcon = [[NSImageView alloc] initWithFrame:NSZeroRect];
+        self.managerTypeIcon.imageScaling = NSImageScaleProportionallyDown;
+        self.managerTypeIcon.imageAlignment = NSImageAlignCenter;
+        [content addSubview:self.managerTypeIcon];
+        self.managerGenderIcon = [[NSImageView alloc] initWithFrame:NSMakeRect(0, 284, 18, 20)];
+        self.managerGenderIcon.imageScaling = NSImageScaleProportionallyDown;
+        self.managerGenderIcon.imageAlignment = NSImageAlignCenter;
+        [content addSubview:self.managerGenderIcon];
+        self.managerEvolutionButton = [NSButton buttonWithTitle:@"" target:nil action:nil];
+        self.managerEvolutionButton.frame = NSMakeRect(392, 289, 62, 31);
+        self.managerEvolutionButton.bordered = NO;
+        [content addSubview:self.managerEvolutionButton];
+
+        NSMutableArray *statLabels = [NSMutableArray arrayWithCapacity:6];
+        NSArray<NSValue *> *statFrames = @[
+            [NSValue valueWithRect:NSMakeRect(346, 170, 62, 18)], [NSValue valueWithRect:NSMakeRect(482, 170, 62, 18)],
+            [NSValue valueWithRect:NSMakeRect(346, 146, 62, 18)], [NSValue valueWithRect:NSMakeRect(482, 146, 62, 18)],
+            [NSValue valueWithRect:NSMakeRect(346, 122, 62, 18)], [NSValue valueWithRect:NSMakeRect(482, 122, 62, 18)]
+        ];
+        for (NSValue *frame in statFrames) {
+            NSTextField *label = [NSTextField labelWithString:@""];
+            label.frame = frame.rectValue; label.textColor = NSColor.whiteColor;
+            label.font = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
+            label.alignment = NSTextAlignmentLeft; label.lineBreakMode = NSLineBreakByTruncatingTail;
+            [content addSubview:label]; [statLabels addObject:label];
+        }
+        self.managerStatLabels = statLabels;
+        NSMutableArray *evLabels = [NSMutableArray arrayWithCapacity:6];
+        for (NSValue *frame in @[
+            [NSValue valueWithRect:NSMakeRect(430, 170, 34, 18)], [NSValue valueWithRect:NSMakeRect(566, 170, 34, 18)],
+            [NSValue valueWithRect:NSMakeRect(430, 146, 34, 18)], [NSValue valueWithRect:NSMakeRect(566, 146, 34, 18)],
+            [NSValue valueWithRect:NSMakeRect(430, 122, 34, 18)], [NSValue valueWithRect:NSMakeRect(566, 122, 34, 18)]
+        ]) {
+            NSTextField *label = [NSTextField labelWithString:@""];
+            label.frame = frame.rectValue; label.textColor = NSColor.yellowColor;
+            label.font = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
+            [content addSubview:label]; [evLabels addObject:label];
+        }
+        self.managerEVLabels = evLabels;
+        NSMutableArray *skillViews = [NSMutableArray arrayWithCapacity:4];
+        for (NSInteger i = 0; i < 4; i++) {
+            PetBagSkillView *skill = [[PetBagSkillView alloc] initWithFrame:
+                NSMakeRect(324 + (i % 2) * 138, 69 - (i / 2) * 57, 129, 49)];
+            skill.target = self; skill.action = @selector(replaceManagedPetSkills:);
+            [content addSubview:skill]; [skillViews addObject:skill];
+        }
+        self.managerSkillViews = skillViews;
+        PetBagButton *close = [[PetBagButton alloc] initWithFrame:NSMakeRect(262, 289, 30, 30)];
+        close.target = self; close.action = @selector(closePetManager:); close.bordered = NO;
+        close.imageScaling = NSImageScaleProportionallyDown;
+        [close setUpImage:PetBagInfoImage(@"close-up") overImage:PetBagInfoImage(@"close-over")];
+        close.toolTip = @"关闭"; [content addSubview:close];
+        NSArray<NSString *> *tips = @[@"身边跟随", @"设为首选", @"更换技能", @"随机攻击开关",
+            @"增加桌宠", @"删除桌宠", @"编辑桌宠", @"精灵恢复并居中"];
+        NSArray<NSString *> *actions = @[NSStringFromSelector(@selector(toggleManagedPetVisibility:)),
+            NSStringFromSelector(@selector(makeManagedPetPrimary:)), NSStringFromSelector(@selector(replaceManagedPetSkills:)),
+            NSStringFromSelector(@selector(toggleManagedPetRandomAttack:)), NSStringFromSelector(@selector(addManagedPet:)),
+            NSStringFromSelector(@selector(removeManagedPet:)), NSStringFromSelector(@selector(editManagedPet:)),
+            NSStringFromSelector(@selector(restoreManagedPet:))];
+        NSArray<NSString *> *names = @[@"follow-show", @"default", @"countermark", @"skill-stone",
+            @"pet-storage", @"storage", @"item", @"cure"];
+        NSArray<NSValue *> *frames = @[
+            [NSValue valueWithRect:NSMakeRect(20, 1, 32, 34)], [NSValue valueWithRect:NSMakeRect(53, 2, 36, 31)],
+            [NSValue valueWithRect:NSMakeRect(79, -6, 48, 48)], [NSValue valueWithRect:NSMakeRect(121, 0, 32, 36)],
+            [NSValue valueWithRect:NSMakeRect(155, 1, 34, 33)], [NSValue valueWithRect:NSMakeRect(190, 1, 34, 34)],
+            [NSValue valueWithRect:NSMakeRect(224, 2, 34, 32)], [NSValue valueWithRect:NSMakeRect(259, 1, 34, 34)]
+        ];
+        for (NSInteger i = 0; i < tips.count; i++) {
+            PetBagButton *button = [[PetBagButton alloc] initWithFrame:frames[i].rectValue];
+            button.target = self; button.action = NSSelectorFromString(actions[i]); button.bordered = NO;
+            button.imagePosition = NSImageOnly; button.imageScaling = NSImageScaleProportionallyDown;
+            [button setUpImage:PetBagButtonImage(names[i], @"up")
+                     overImage:PetBagButtonImage(names[i], @"over")];
+            button.toolTip = tips[i]; button.accessibilityLabel = tips[i]; [content addSubview:button];
+            if (i == 0) self.managerFollowButton = button;
+        }
         [self.managerWindow center];
     }
-    [self.managerTable reloadData];
-    if (self.managerTable.selectedRow < 0 && self.petViews.count > 0)
-        [self.managerTable selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+    if (self.managerSelectedIndex < 0 || self.managerSelectedIndex >= (NSInteger)self.petViews.count)
+        self.managerSelectedIndex = 0;
+    self.managerPage = self.managerSelectedIndex / 6;
+    [self refreshManagerSlots];
+    [self updateManagerDetails];
     [NSApp activateIgnoringOtherApps:YES]; [self.managerWindow makeKeyAndOrderFront:nil];
 }
 
@@ -1616,7 +2248,10 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     [self installStatusItem];
     self.petViews = [NSMutableArray array]; self.petPanels = [NSMutableArray array];
-    for (NSDictionary *savedRecord in [self savedPetRecords]) {
+    NSArray *launchRecords = RunningTests() ? @[@{ @"id": @"test-pet", @"name": @"皮皮",
+        @"petID": @"1", @"size": @1, @"createdAt": @0, @"visible": @YES,
+        @"freeMovement": @NO, @"randomAttack": @NO }] : [self savedPetRecords];
+    for (NSDictionary *savedRecord in launchRecords) {
         NSMutableDictionary *record = savedRecord.mutableCopy;
         NSString *petID = [record[@"petID"] description] ?: @"1";
         NSURL *resourceURL = [self readyResourceForPetID:petID];
@@ -1626,14 +2261,47 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     }
     if (self.petViews.count == 0) { [NSApp terminate:nil]; return; }
     self.petView = self.petViews.firstObject; self.panel = self.petPanels.firstObject;
+    [self savePetInstances];
     NSPoint mouse = NSEvent.mouseLocation; NSScreen *screen = NSScreen.mainScreen;
     for (NSScreen *candidate in NSScreen.screens) if (NSPointInRect(mouse, candidate.frame)) { screen = candidate; break; }
-    [NSApp activateIgnoringOtherApps:YES]; [self.panel makeKeyAndOrderFront:nil];
+    for (PetView *view in self.petViews) if (view.desktopVisible) {
+        [NSApp activateIgnoringOtherApps:YES]; [view.window makeKeyAndOrderFront:nil]; break;
+    }
 
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_STATUS_ITEM"]) {
         BOOL valid = NSApp.activationPolicy == NSApplicationActivationPolicyAccessory &&
             self.statusItem.button.image && self.statusItem.menu.numberOfItems == 3;
         exit(valid ? 0 : 14);
+    }
+    if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_SKILL_MENU"]) {
+        NSEvent *event = [NSEvent mouseEventWithType:NSEventTypeRightMouseDown location:NSZeroPoint
+            modifierFlags:0 timestamp:0 windowNumber:0 context:nil eventNumber:0 clickCount:1 pressure:0];
+        NSMenu *menu = [self.petView menuForEvent:event];
+        BOOL valid = self.petView.selectedSkillIDs.count == 4 &&
+            [PetActionForMoveInfo(@[@"", @0, @0, @1]) isEqualToString:@"attack"] &&
+            [PetActionForMoveInfo(@[@"", @0, @0, @2]) isEqualToString:@"sa"] &&
+            [PetActionForMoveInfo(@[@"", @0, @0, @4]) isEqualToString:@"cp"] &&
+            [menu itemWithTitle:@"自定义动作名称…"] == nil && [menu itemWithTitle:@"重置动作名称"] == nil;
+        for (NSUInteger i = 0; valid && i < self.petView.selectedSkillIDs.count; i++) {
+            NSNumber *skillID = self.petView.selectedSkillIDs[i]; NSArray *move = PetMoveInfo(skillID);
+            NSMenuItem *item = menu.itemArray[i];
+            valid = [item.title isEqualToString:move[0]] && [item.representedObject isEqual:skillID] &&
+                item.action == @selector(playConfiguredSkill:);
+        }
+        if (valid) {
+            NSMenuItem *first = menu.itemArray.firstObject; [self.petView playConfiguredSkill:first];
+            valid = [self.petView.currentAction isEqualToString:PetActionForMoveInfo(PetMoveInfo(first.representedObject))];
+        }
+        [self.petView menuDidClose:menu]; exit(valid ? 0 : 15);
+    }
+    if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_LONG_NAME"]) {
+        self.petView.petID = @"309"; self.petView.displayName = PetDefaultName(@"309");
+        [self showPetManager:nil];
+        CGFloat required = ceil(self.managerInfoLabels[1].attributedStringValue.size.width) + 6;
+        BOOL valid = [self.managerInfoLabels[1].stringValue containsString:@"魔焰猩猩"] &&
+            NSWidth(self.managerInfoLabels[1].frame) >= required && !self.managerGenderIcon.hidden &&
+            NSMaxX(self.managerGenderIcon.frame) <= 600;
+        exit(valid ? 0 : 16);
     }
 
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_MODAL_CALLBACK"]) {
@@ -1654,19 +2322,88 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         NSUInteger before = self.petViews.count;
         NSDictionary *record = @{ @"id": @"__multi_test", @"name": @"第二只",
                                   @"petID": self.petView.petID, @"size": @0.5,
-                                  @"freeMovement": @NO, @"randomAttack": @YES };
+                                  @"visible": @NO, @"freeMovement": @NO, @"randomAttack": @YES };
         PetView *second = [self addPetFromRecord:record
                                      resourceURL:[self readyResourceForPetID:self.petView.petID]];
         [self savePetInstances];
         NSArray *saved = [NSUserDefaults.standardUserDefaults arrayForKey:PetInstancesKey];
         [self showPetManager:nil];
+        NSView *managerContent = self.managerWindow.contentView;
+        NSBitmapImageRep *managerRender = [managerContent bitmapImageRepForCachingDisplayInRect:managerContent.bounds];
+        [managerContent cacheDisplayInRect:managerContent.bounds toBitmapImageRep:managerRender];
+        BOOL rendered = [[managerRender representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
+            writeToFile:@"/tmp/seer-manager-render.png" atomically:YES];
+        NSImage *normalButtonImage = self.managerFollowButton.image;
+        NSEvent *hoverEvent = [NSEvent mouseEventWithType:NSEventTypeMouseMoved location:NSZeroPoint
+            modifierFlags:0 timestamp:0 windowNumber:0 context:nil eventNumber:0 clickCount:0 pressure:0];
+        [self.managerFollowButton mouseEntered:hoverEvent];
+        BOOL originalHover = self.managerFollowButton.image == self.managerFollowButton.overImage &&
+            self.managerFollowButton.image != normalButtonImage;
+        [self.managerFollowButton mouseExited:hoverEvent];
+        BOOL hidden = !second.desktopVisible && !second.window.visible &&
+            ![saved.lastObject[@"visible"] boolValue] && !second.timer &&
+            !second.movementTimer && !second.randomAttackTimer;
+        [self setPetView:second desktopVisible:YES];
+        BOOL shown = second.desktopVisible && second.window.visible && second.randomAttackTimer;
+        NSUInteger occupiedSlots = 0;
+        for (PetBagSlotButton *slot in self.managerSlots) if (slot.occupied && !slot.hidden) occupiedSlots++;
+        NSInteger remaining = MAX(0, (NSInteger)self.petViews.count - self.managerPage * 6);
+        BOOL originalEmptySlots = occupiedSlots == (NSUInteger)MIN(6, remaining) &&
+            [self.managerSlots filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(PetBagSlotButton *slot, NSDictionary *_) {
+                return slot.hidden;
+            }]].count == 0;
+        NSArray *recommended5000 = PetDefaultSkillIDs(@"5000");
+        BOOL skillConfig = self.petView.selectedSkillIDs.count > 0 &&
+            [self.managerSkillViews.firstObject.skillName isEqualToString:
+                PetMoveInfo(self.petView.selectedSkillIDs.firstObject).firstObject];
+        BOOL propertyIconsValid = YES;
+        for (PetBagSkillView *skillView in self.managerSkillViews) {
+            NSArray *move = PetMoveInfo(skillView.skillID);
+            if (move.count > 3 && [move[3] integerValue] == 4)
+                propertyIconsValid = propertyIconsValid && [skillView.typeIcon.TIFFRepresentation
+                    isEqualToData:PetTypeIconNamed(@"prop").TIFFRepresentation];
+        }
         BOOL independent = second && self.petViews.count == before + 1 &&
             ![second.instanceID isEqualToString:self.petView.instanceID] &&
             ![second.displayName isEqualToString:self.petView.displayName] &&
             second.sizeMultiplier == 0.5 && !second.freeMovementEnabled && second.randomAttackEnabled &&
-            self.managerTable.numberOfRows == (NSInteger)self.petViews.count &&
+            self.managerSlots.count == 6 && self.managerPageLabel.stringValue.length > 0 &&
+            [self.managerSlots.firstObject isKindOfClass:PetBagSlotButton.class] &&
+            NSEqualSizes(self.managerSlots.firstObject.frame.size, NSMakeSize(126, 73)) &&
+            self.petView.bagImage &&
+            ((PetBagSlotButton *)self.managerSlots.firstObject).petImage == self.petView.bagImage &&
+            self.managerInfoLabels.count == 6 && self.managerStatLabels.count == 6 &&
+            self.managerEVLabels.count == 6 && self.managerSkillViews.count == 4 &&
+            second.createdAt > 0 && NSMinY(self.managerPreview.frame) == 191 &&
+            [self.managerFeatureLabel.stringValue hasPrefix:@"特性:"] &&
+            [self.managerStatLabels[0].stringValue isEqualToString:[NSString stringWithFormat:@"攻击:%@",
+                PetBaseStats(self.petView.petID).firstObject]] &&
+            [PetDefaultName(@"095") isEqualToString:@"尼布"] &&
+            [PetDefaultName(@"300") isEqualToString:@"谱尼"] &&
+            [PetDefaultName(@"5000") isEqualToString:@"圣灵谱尼"] &&
+            [recommended5000 isEqualToArray:@[@31140, @25678, @25679, @31142]] &&
+            skillConfig && second.selectedSkillIDs.count > 0 && [saved.lastObject[@"skills"] count] > 0 &&
+            self.managerTypeIcon.image != nil &&
+            [self.managerTypeIcon.toolTip containsString:PetTypeName(PetMetadata(self.petView.petID)[0])] &&
+            self.managerSkillViews.firstObject.typeIcon != nil &&
+            propertyIconsValid &&
+            fabs(NSMinX(self.managerTypeIcon.frame) - NSMaxX(self.managerInfoLabels[1].frame) - 6) < 0.1 &&
+            fabs(NSMinX(self.managerGenderIcon.frame) - NSMaxX(self.managerTypeIcon.frame) - 6) < 0.1 &&
+            PetGenderIcon(1) != nil &&
+            NSMaxX(self.managerGenderIcon.frame) <= NSWidth(self.managerWindow.contentView.bounds) - 10 &&
+            self.managerEvolutionButton.toolTip.length > 0 &&
+            [self.managerInfoLabels[0].stringValue hasPrefix:@"序号:"] &&
+            [self.managerInfoLabels[1].stringValue hasPrefix:@"名字:"] &&
+            [self.managerInfoLabels[2].stringValue hasPrefix:@"等级:"] &&
+            [self.managerInfoLabels[3].stringValue hasPrefix:@"升级所需经验值:"] &&
+            [self.managerInfoLabels[4].stringValue hasPrefix:@"性格:"] &&
+            [self.managerInfoLabels[5].stringValue hasPrefix:@"获得时间:"] &&
+            self.managerFollowButton.upImage && self.managerFollowButton.overImage &&
+            fabs(NSHeight(managerContent.bounds) - 329.0) < 0.1 &&
+            NSEqualSizes(self.managerPreview.frame.size, NSMakeSize(100, 120)) &&
+            self.managerPreview.image == self.petView.bagImage && self.managerDetail.stringValue.length > 0 &&
             saved.count == self.petViews.count &&
-            ![second.actionNamesDefaultsKey isEqualToString:self.petView.actionNamesDefaultsKey];
+            hidden && shown && rendered && originalHover && originalEmptySlots;
         [second.window orderOut:nil];
         [self.petPanels removeLastObject]; [self.petViews removeLastObject];
         [NSUserDefaults.standardUserDefaults setObject:oldRecords forKey:PetInstancesKey];
@@ -1709,20 +2446,8 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
                                            self.petView.actionAnchorScreenPosition.y - self.petView.restingCenter.y) < 1.0;
         [self.petView.timer invalidate]; [self.petView restoreIdleWindow]; [self.petView startIdlePlayback];
 
-        NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-        NSString *keyA = @"actionNames.instance.__testA", *keyB = @"actionNames.instance.__testB";
-        id oldA = [defaults objectForKey:keyA], oldB = [defaults objectForKey:keyB];
-        NSString *originalInstanceID = self.petView.instanceID;
-        [defaults setObject:@{@"attack": @"测试动作"} forKey:keyA]; [defaults removeObjectForKey:keyB];
-        self.petView.instanceID = @"__testA"; BOOL customized = [[self.petView actionNameForKey:@"attack"] isEqualToString:@"测试动作"];
-        [self.petView resetActionNames:nil];
-        BOOL reset = [[self.petView actionNameForKey:@"attack"] isEqualToString:DefaultActionNames()[@"attack"]];
-        self.petView.instanceID = @"__testB"; BOOL isolated = ![[self.petView actionNameForKey:@"attack"] isEqualToString:@"测试动作"];
-        self.petView.instanceID = originalInstanceID;
-        if (oldA) [defaults setObject:oldA forKey:keyA]; else [defaults removeObjectForKey:keyA];
-        if (oldB) [defaults setObject:oldB forKey:keyB]; else [defaults removeObjectForKey:keyB];
         exit(movedLeft && usedLeftWalk && stoppedLeft && bounced && usedRightWalk && sameWalkScale && mirrored &&
-             mirroredActionAligned && customized && reset && isolated ? 0 : 9);
+             mirroredActionAligned ? 0 : 9);
     }
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_RANDOM_ATTACK"]) {
         [self.petView.randomAttackTimer invalidate]; self.petView.randomAttackTimer = nil;
@@ -1758,9 +2483,13 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     if (testPetID) {
         NSError *error = nil; NSURL *url = [self installPetID:testPetID error:&error];
         BOOL loaded = url && [self.petView loadFramesFromURL:url petID:testPetID];
+        NSURL *bagURL = [[[url URLByAppendingPathComponent:@"frames"] URLByAppendingPathComponent:@"bag-front"]
+                         URLByAppendingPathComponent:@"1.png"];
+        NSValue *bagBounds = [self.petView visibleBoundsAtURL:bagURL maxSide:MaxRasterSide];
+        BOOL bagTrimmed = bagBounds && NSEqualSizes(self.petView.bagImage.size, bagBounds.rectValue.size);
         BOOL movementLoaded = ![testPetID isEqualToString:@"1"] ||
             (self.petView.walkLeftFrames.count > 1 && self.petView.walkRightFrames.count > 1);
-        exit(loaded && movementLoaded &&
+        exit(loaded && bagTrimmed && movementLoaded &&
              (![testPetID isEqualToString:@"1"] || self.petView.idleFrames.count > 1) ? 0 : 4);
     }
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_SCALE"]) {
@@ -1771,8 +2500,8 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         BOOL complete = canvas.width * self.petView.currentScale <= actionSize.width &&
                         canvas.height * self.petView.currentScale <= actionSize.height &&
                         actionSize.width >= idleSize.width && actionSize.height >= idleSize.height;
-        BOOL sameSourceScale = fabs(self.petView.currentScale *
-                                    [self.petView.sourceRasterScales[@"attack"] doubleValue] -
+        NSNumber *attackSourceScale = self.petView.sourceRasterScales[@"attack"] ?: @1.0;
+        BOOL sameSourceScale = fabs(self.petView.currentScale * attackSourceScale.doubleValue -
                                     self.petView.displayScale * self.petView.idleRasterScale) < 0.001;
         BOOL aligned = hypot(self.petView.actionAnchorScreenPosition.x - self.petView.restingCenter.x,
                              self.petView.actionAnchorScreenPosition.y - self.petView.restingCenter.y) < 1.0;
@@ -1789,6 +2518,11 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         }
         NSMenuItem *restore = [NSMenuItem new]; restore.representedObject = @(originalSize);
         [self.petView changeSize:restore];
+        if (!(complete && sameSourceScale && aligned && sizesValid))
+            fprintf(stderr, "scale test: complete=%d source=%d aligned=%d sizes=%d action=%g*%g idle=%g*%g\n",
+                complete, sameSourceScale, aligned, sizesValid, self.petView.currentScale,
+                attackSourceScale.doubleValue, self.petView.displayScale,
+                self.petView.idleRasterScale);
         exit(complete && sameSourceScale && aligned && sizesValid ? 0 : 6);
     }
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_LAYOUT"]) {
