@@ -18,6 +18,7 @@ static const CGFloat MovementSpeed = 60.0;
 static const CGFloat RandomAttackInterval = 8.0;
 static const CGFloat MaxRasterSide = IdleDisplaySize * 2.0;
 static const CGFloat MaxActionRasterSide = 4096.0;
+static NSString * const PetInstancesKey = @"petInstances.v1";
 static void SetError(NSError **error, NSString *message) {
     if (error) *error = [NSError errorWithDomain:@"SeerPet" code:1 userInfo:@{NSLocalizedDescriptionKey: message}];
 }
@@ -101,6 +102,13 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
                               atomically:YES];
 }
 
+@class PetView;
+@protocol PetViewOwner <NSObject>
+- (void)savePetInstances;
+- (void)showPetManager:(id)sender;
+- (void)changePet:(id)sender;
+@end
+
 @interface PetView : NSView <NSMenuDelegate>
 @property(nonatomic, strong) NSDictionary<NSString *, NSArray<NSImage *> *> *actionFrames;
 @property(nonatomic, strong) NSArray<NSImage *> *idleFrames;
@@ -119,6 +127,9 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 @property(nonatomic, strong) NSTimer *randomAttackTimer;
 @property(nonatomic, strong) NSDictionary<NSString *, NSValue *> *actionAnchors;
 @property(nonatomic, strong) NSDictionary<NSString *, NSValue *> *frameBodySizes;
+@property(nonatomic, weak) id<PetViewOwner> owner;
+@property(nonatomic, copy) NSString *instanceID;
+@property(nonatomic, copy) NSString *displayName;
 @property(nonatomic, copy) NSString *petID;
 @property(nonatomic, copy) NSString *currentAction;
 @property(nonatomic) CGFloat displayScale;
@@ -142,7 +153,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 @property(nonatomic) BOOL randomAttackEnabled;
 @property(nonatomic) BOOL movementPaused;
 @property(nonatomic) BOOL facingLeft;
-- (instancetype)initWithFrame:(NSRect)frame resourceURL:(NSURL *)resourceURL petID:(NSString *)petID;
+- (instancetype)initWithFrame:(NSRect)frame resourceURL:(NSURL *)resourceURL record:(NSDictionary *)record;
 - (BOOL)loadFramesFromURL:(NSURL *)resourceURL petID:(NSString *)petID;
 - (void)play:(NSString *)action;
 - (void)startIdlePlayback;
@@ -228,12 +239,15 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     return result;
 }
 
-- (instancetype)initWithFrame:(NSRect)frame resourceURL:(NSURL *)resourceURL petID:(NSString *)petID {
+- (instancetype)initWithFrame:(NSRect)frame resourceURL:(NSURL *)resourceURL record:(NSDictionary *)record {
     if ((self = [super initWithFrame:frame])) {
-        CGFloat savedSize = [NSUserDefaults.standardUserDefaults doubleForKey:@"petSize"];
+        NSString *petID = [record[@"petID"] description] ?: @"1";
+        self.instanceID = [record[@"id"] description] ?: NSUUID.UUID.UUIDString;
+        self.displayName = [record[@"name"] description] ?: [NSString stringWithFormat:@"%@ 号精灵", petID];
+        CGFloat savedSize = [record[@"size"] doubleValue];
         self.sizeMultiplier = [PetSizes() containsObject:@(savedSize)] ? savedSize : 1.0;
-        self.freeMovementEnabled = [NSUserDefaults.standardUserDefaults boolForKey:@"freeMovement"];
-        self.randomAttackEnabled = [NSUserDefaults.standardUserDefaults boolForKey:@"randomAttack"];
+        self.freeMovementEnabled = [record[@"freeMovement"] boolValue];
+        self.randomAttackEnabled = [record[@"randomAttack"] boolValue];
         self.movementDirection = 1.0;
         if (![self loadFramesFromURL:resourceURL petID:petID]) return nil;
         self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -666,6 +680,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         [self.timer invalidate]; self.timer = nil;
         [self restoreIdleWindow]; [self startIdlePlayback];
     }
+    [self.owner savePetInstances];
 }
 - (void)playAttack:(id)sender { [self play:@"attack"]; }
 - (void)playSA:(id)sender { [self play:@"sa"]; }
@@ -673,7 +688,7 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 - (void)playHited:(id)sender { [self play:@"hited"]; }
 
 - (NSString *)actionNamesDefaultsKey {
-    return [NSString stringWithFormat:@"actionNames.%@", self.petID];
+    return [NSString stringWithFormat:@"actionNames.instance.%@", self.instanceID];
 }
 
 - (NSString *)actionNameForKey:(NSString *)action {
@@ -709,26 +724,46 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     self.movementPaused = NO;
 }
 
+- (void)renamePet:(id)sender {
+    self.movementPaused = YES;
+    NSAlert *alert = [NSAlert new]; alert.messageText = @"重命名桌宠";
+    [alert addButtonWithTitle:@"保存"]; [alert addButtonWithTitle:@"取消"];
+    NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 240, 24)];
+    field.stringValue = self.displayName ?: @""; alert.accessoryView = field;
+    alert.window.initialFirstResponder = field;
+    NSTimer *focusTimer = [NSTimer timerWithTimeInterval:0 repeats:NO block:^(__unused NSTimer *timer) {
+        [alert.window makeFirstResponder:field]; [field selectText:nil];
+    }];
+    [NSRunLoop.mainRunLoop addTimer:focusTimer forMode:NSModalPanelRunLoopMode];
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *name = [field.stringValue stringByTrimmingCharactersInSet:
+                          NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (name.length > 0) { self.displayName = name; [self.owner savePetInstances]; }
+    }
+    self.movementPaused = NO;
+}
+
 - (void)resetActionNames:(id)sender {
     [NSUserDefaults.standardUserDefaults removeObjectForKey:self.actionNamesDefaultsKey];
 }
 
 - (void)toggleFreeMovement:(NSMenuItem *)sender {
     self.freeMovementEnabled = !self.freeMovementEnabled;
-    [NSUserDefaults.standardUserDefaults setBool:self.freeMovementEnabled forKey:@"freeMovement"];
     if (!self.freeMovementEnabled) [self startIdlePlayback];
     [self updateMovementTimer];
+    [self.owner savePetInstances];
 }
 
 - (void)toggleRandomAttack:(NSMenuItem *)sender {
     self.randomAttackEnabled = !self.randomAttackEnabled;
-    [NSUserDefaults.standardUserDefaults setBool:self.randomAttackEnabled forKey:@"randomAttack"];
     [self updateRandomAttackTimer];
+    [self.owner savePetInstances];
 }
 
 - (NSMenu *)menuForEvent:(NSEvent *)event {
     self.movementPaused = YES;
-    NSMenu *menu = [[NSMenu alloc] initWithTitle:[NSString stringWithFormat:@"%@ 号精灵", self.petID]];
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:
+        [NSString stringWithFormat:@"%@（%@ 号）", self.displayName, self.petID]];
     menu.autoenablesItems = NO; menu.delegate = self;
     NSArray *items = @[
         @[[self actionNameForKey:@"attack"], NSStringFromSelector(@selector(playAttack:))],
@@ -758,13 +793,17 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     }
     sizeItem.submenu = sizeMenu;
     [menu addItem:NSMenuItem.separatorItem];
+    NSMenuItem *rename = [menu addItemWithTitle:@"重命名…" action:@selector(renamePet:) keyEquivalent:@""];
+    rename.target = self;
     NSMenuItem *customize = [menu addItemWithTitle:@"自定义动作名称…" action:@selector(customizeActionNames:) keyEquivalent:@""];
     customize.target = self;
     NSMenuItem *reset = [menu addItemWithTitle:@"重置动作名称" action:@selector(resetActionNames:) keyEquivalent:@""];
     reset.target = self;
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *change = [menu addItemWithTitle:@"更换精灵…" action:@selector(changePet:) keyEquivalent:@""];
-    change.target = NSApp.delegate;
+    change.target = NSApp.delegate; change.representedObject = self;
+    NSMenuItem *manager = [menu addItemWithTitle:@"宠物管理…" action:@selector(showPetManager:) keyEquivalent:@""];
+    manager.target = NSApp.delegate;
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *quit = [menu addItemWithTitle:@"退出桌宠" action:@selector(terminate:) keyEquivalent:@""];
     quit.target = NSApp;
@@ -803,8 +842,8 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     self.restingFrame = NSMakeRect(anchorScreen.x - anchor.x, anchorScreen.y - anchor.y, side, side);
     self.restingCenter = anchorScreen;
     [self.window setFrame:self.restingFrame display:YES];
-    [NSUserDefaults.standardUserDefaults setDouble:newSize forKey:@"petSize"];
     [self startIdlePlayback];
+    [self.owner savePetInstances];
 }
 @end
 
@@ -816,9 +855,14 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 - (NSRect)constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen { return frameRect; }
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, PetViewOwner, NSTableViewDataSource, NSTableViewDelegate>
 @property(nonatomic, strong) NSPanel *panel;
 @property(nonatomic, strong) PetView *petView;
+@property(nonatomic, strong) NSMutableArray<PetView *> *petViews;
+@property(nonatomic, strong) NSMutableArray<NSPanel *> *petPanels;
+@property(nonatomic, strong) NSWindow *managerWindow;
+@property(nonatomic, strong) NSTableView *managerTable;
+@property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, strong) NSProgressIndicator *conversionProgress;
 @property(nonatomic, strong) NSTextField *conversionStatus;
 @property(nonatomic) BOOL converting;
@@ -849,6 +893,85 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 }
 - (NSURL *)cachedPetURL:(NSString *)petID {
     return [[[self supportURL] URLByAppendingPathComponent:@"pets"] URLByAppendingPathComponent:petID];
+}
+
+- (NSArray<NSDictionary *> *)savedPetRecords {
+    NSArray *saved = [NSUserDefaults.standardUserDefaults arrayForKey:PetInstancesKey];
+    if (saved.count > 0) return saved;
+
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSString *petID = [defaults stringForKey:@"petID"] ?: @"1";
+    NSString *instanceID = NSUUID.UUID.UUIDString;
+    CGFloat size = [defaults doubleForKey:@"petSize"];
+    if (![PetSizes() containsObject:@(size)]) size = 1.0;
+    NSDictionary *record = @{ @"id": instanceID, @"name": [NSString stringWithFormat:@"%@ 号精灵", petID],
+                              @"petID": petID, @"size": @(size),
+                              @"freeMovement": @([defaults boolForKey:@"freeMovement"]),
+                              @"randomAttack": @([defaults boolForKey:@"randomAttack"]) };
+    NSDictionary *oldNames = [defaults dictionaryForKey:[NSString stringWithFormat:@"actionNames.%@", petID]];
+    if (oldNames) [defaults setObject:oldNames forKey:[NSString stringWithFormat:@"actionNames.instance.%@", instanceID]];
+    [defaults setObject:@[record] forKey:PetInstancesKey];
+    return @[record];
+}
+
+- (void)savePetInstances {
+    if (!self.petViews) return;
+    NSMutableArray *records = [NSMutableArray arrayWithCapacity:self.petViews.count];
+    for (PetView *view in self.petViews) {
+        NSRect frame = view.playingAction ? view.restingFrame : view.window.frame;
+        [records addObject:@{ @"id": view.instanceID ?: NSUUID.UUID.UUIDString,
+                              @"name": view.displayName ?: @"桌宠", @"petID": view.petID ?: @"1",
+                              @"size": @(view.sizeMultiplier), @"freeMovement": @(view.freeMovementEnabled),
+                              @"randomAttack": @(view.randomAttackEnabled),
+                              @"x": @(NSMinX(frame)), @"y": @(NSMinY(frame)) }];
+    }
+    [NSUserDefaults.standardUserDefaults setObject:records forKey:PetInstancesKey];
+    [self.managerTable reloadData];
+}
+
+- (NSURL *)readyResourceForPetID:(NSString *)petID {
+    NSURL *resourceURL = [self cachedPetURL:petID];
+    [self installIdleForPetID:petID intoPetURL:resourceURL];
+    BOOL hasFrames = [NSFileManager.defaultManager
+        fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@"frames"] path]];
+    BOOL needsUpgrade = hasFrames &&
+        (![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".walk-scan-v2"] path]] ||
+         ![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".raster-v3"] path]] ||
+         ![NSFileManager.defaultManager fileExistsAtPath:
+             [[[resourceURL URLByAppendingPathComponent:@"frames"] URLByAppendingPathComponent:@".layout-v1.plist"] path]]);
+    if (needsUpgrade) resourceURL = [self installPetID:petID error:nil] ?: resourceURL;
+    if (![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@"frames"] path]])
+        return [petID isEqualToString:@"1"] ? NSBundle.mainBundle.resourceURL : nil;
+    return resourceURL;
+}
+
+- (PetView *)addPetFromRecord:(NSDictionary *)record resourceURL:(NSURL *)resourceURL {
+    PetView *view = [[PetView alloc] initWithFrame:NSMakeRect(0, 0, BaseWindowSize, BaseWindowSize)
+                                       resourceURL:resourceURL record:record];
+    if (!view) return nil;
+    view.owner = self;
+    CGFloat side = BaseWindowSize * view.sizeMultiplier;
+    [view setFrameSize:NSMakeSize(side, side)];
+    NSPanel *panel = [[PetPanel alloc] initWithContentRect:NSMakeRect(0, 0, side, side)
+        styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
+    panel.opaque = NO; panel.backgroundColor = NSColor.clearColor; panel.hasShadow = NO;
+    panel.level = NSFloatingWindowLevel;
+    panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+        NSWindowCollectionBehaviorFullScreenAuxiliary;
+    panel.hidesOnDeactivate = NO; panel.contentView = view;
+
+    NSNumber *savedX = record[@"x"], *savedY = record[@"y"];
+    if (savedX && savedY) {
+        [panel setFrameOrigin:NSMakePoint(savedX.doubleValue, savedY.doubleValue)];
+    } else {
+        NSScreen *screen = NSScreen.mainScreen; NSRect visible = screen.visibleFrame;
+        CGFloat offset = self.petViews.count * 36.0;
+        [panel setFrameOrigin:NSMakePoint(NSMidX(visible) - side / 2.0 + offset,
+                                          NSMidY(visible) - side / 2.0 - offset)];
+    }
+    [self.petViews addObject:view]; [self.petPanels addObject:panel];
+    [panel orderFront:nil];
+    return view;
 }
 
 - (void)installIdleForPetID:(NSString *)petID intoPetURL:(NSURL *)petURL {
@@ -1253,23 +1376,47 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
 
 - (void)showError:(NSString *)message {
     NSAlert *alert = [NSAlert new];
-    alert.alertStyle = NSAlertStyleWarning; alert.messageText = @"更换精灵失败";
+    alert.alertStyle = NSAlertStyleWarning; alert.messageText = @"操作失败";
     alert.informativeText = message ?: @"未知错误"; [alert runModal];
 }
 
-- (void)changePet:(id)sender {
-    if (self.converting) return;
-    if (sender) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [self changePet:nil]; });
-        return;
-    }
+- (NSURL *)preparePetID:(NSString *)petID error:(NSError **)error {
+    if (self.converting) { SetError(error, @"另一个精灵正在转换，请稍候"); return nil; }
+    self.converting = YES;
+    __block NSURL *petURL = nil;
+    __block NSError *conversionError = nil;
+    NSView *progressView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 48)];
+    self.conversionStatus = [NSTextField labelWithString:@"准备转换…"];
+    self.conversionStatus.frame = NSMakeRect(0, 28, 320, 18);
+    self.conversionProgress = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0, 4, 320, 16)];
+    self.conversionProgress.indeterminate = NO;
+    self.conversionProgress.minValue = 0; self.conversionProgress.maxValue = 100;
+    self.conversionProgress.doubleValue = 0;
+    [progressView addSubview:self.conversionStatus]; [progressView addSubview:self.conversionProgress];
+    NSAlert *progress = [NSAlert new];
+    progress.messageText = [NSString stringWithFormat:@"正在准备 %@ 号精灵…", petID];
+    progress.informativeText = @"复杂精灵可能需要几分钟，转换期间会限制内存占用。";
+    progress.accessoryView = progressView;
+    [progress addButtonWithTitle:@"请稍候"].enabled = NO;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        petURL = [self installPetID:petID error:&conversionError];
+        [self performOnModalMainThread:^{ [NSApp abortModal]; }];
+    });
+    [progress runModal];
+    self.conversionProgress = nil; self.conversionStatus = nil; self.converting = NO;
+    if (error) *error = conversionError;
+    return petURL;
+}
+
+- (void)changePetForView:(PetView *)target {
+    if (!target || self.converting) return;
     [NSApp activateIgnoringOtherApps:YES];
     NSAlert *input = [NSAlert new];
     input.messageText = @"更换赛尔号精灵";
     input.informativeText = @"输入精灵编号。首次使用该编号需要联网下载并转换。";
     [input addButtonWithTitle:@"更换"]; [input addButtonWithTitle:@"取消"];
     NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 220, 24)];
-    field.placeholderString = @"例如：1"; field.stringValue = self.petView.petID ?: @"1"; input.accessoryView = field;
+    field.placeholderString = @"例如：1"; field.stringValue = target.petID ?: @"1"; input.accessoryView = field;
     input.window.initialFirstResponder = field;
     [input.window makeKeyAndOrderFront:nil];
     [input.window makeFirstResponder:field];
@@ -1286,80 +1433,208 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     if (petID.length == 0 || [petID rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location != NSNotFound || petID.integerValue <= 0) {
         [self showError:@"编号只能是大于 0 的整数"]; return;
     }
-
-    self.converting = YES;
-    __block NSURL *petURL = nil;
-    __block NSError *conversionError = nil;
-    NSView *progressView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 48)];
-    self.conversionStatus = [NSTextField labelWithString:@"准备转换…"];
-    self.conversionStatus.frame = NSMakeRect(0, 28, 320, 18);
-    self.conversionProgress = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0, 4, 320, 16)];
-    self.conversionProgress.indeterminate = NO;
-    self.conversionProgress.minValue = 0; self.conversionProgress.maxValue = 100;
-    self.conversionProgress.doubleValue = 0;
-    [progressView addSubview:self.conversionStatus];
-    [progressView addSubview:self.conversionProgress];
-    NSAlert *progress = [NSAlert new];
-    progress.messageText = [NSString stringWithFormat:@"正在准备 %@ 号精灵…", petID];
-    progress.informativeText = @"复杂精灵可能需要几分钟，转换期间会限制内存占用。";
-    progress.accessoryView = progressView;
-    [progress addButtonWithTitle:@"请稍候"].enabled = NO;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        petURL = [self installPetID:petID error:&conversionError];
-        [self performOnModalMainThread:^{ [NSApp abortModal]; }];
-    });
-    [progress runModal];
-    self.conversionProgress = nil; self.conversionStatus = nil;
-    self.converting = NO;
-    if (!petURL || ![self.petView loadFramesFromURL:petURL petID:petID]) {
-        if (petURL) [NSFileManager.defaultManager removeItemAtURL:petURL error:nil];
+    NSError *conversionError = nil;
+    NSURL *petURL = [self preparePetID:petID error:&conversionError];
+    if (!petURL || ![target loadFramesFromURL:petURL petID:petID]) {
         [self showError:conversionError.localizedDescription ?: @"提取出的动作帧无法播放"]; return;
     }
-    [NSUserDefaults.standardUserDefaults setObject:petID forKey:@"petID"];
-    [self.petView play:@"sa"];
+    [self savePetInstances]; [target play:@"sa"];
+}
+
+- (void)changePet:(id)sender {
+    PetView *target = [sender isKindOfClass:NSMenuItem.class] ? [sender representedObject] : nil;
+    target = target ?: self.petView;
+    if (sender) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self changePetForView:target]; });
+        return;
+    }
+    [self changePetForView:target];
+}
+
+- (NSDictionary *)petEditorValuesForView:(PetView *)view title:(NSString *)title {
+    NSAlert *alert = [NSAlert new]; alert.messageText = title;
+    alert.informativeText = @"每个桌宠的名称、形象和行为设置彼此独立。";
+    [alert addButtonWithTitle:@"保存"]; [alert addButtonWithTitle:@"取消"];
+    NSView *form = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 340, 150)];
+    NSTextField *name = [[NSTextField alloc] initWithFrame:NSMakeRect(92, 118, 248, 24)];
+    name.stringValue = view.displayName ?: @"新桌宠";
+    NSTextField *petID = [[NSTextField alloc] initWithFrame:NSMakeRect(92, 86, 248, 24)];
+    petID.stringValue = view.petID ?: @"1";
+    NSPopUpButton *size = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(92, 54, 120, 26)];
+    for (NSNumber *value in PetSizes())
+        [size addItemWithTitle:[NSString stringWithFormat:@"%g×", value.doubleValue]];
+    CGFloat selectedSize = view ? view.sizeMultiplier : 1.0;
+    [size selectItemWithTitle:[NSString stringWithFormat:@"%g×", selectedSize]];
+    NSButton *movement = [NSButton checkboxWithTitle:@"自由移动" target:nil action:nil];
+    movement.frame = NSMakeRect(92, 26, 110, 22); movement.state = view.freeMovementEnabled;
+    NSButton *random = [NSButton checkboxWithTitle:@"每 8 秒随机攻击" target:nil action:nil];
+    random.frame = NSMakeRect(205, 26, 135, 22); random.state = view.randomAttackEnabled;
+    NSArray *labels = @[@"名称", @"精灵编号", @"大小"];
+    for (NSUInteger i = 0; i < labels.count; i++) {
+        NSTextField *label = [NSTextField labelWithString:labels[i]];
+        label.frame = NSMakeRect(0, 120 - i * 32, 82, 22); label.alignment = NSTextAlignmentRight;
+        [form addSubview:label];
+    }
+    for (NSView *control in @[name, petID, size, movement, random]) [form addSubview:control];
+    alert.accessoryView = form; alert.window.initialFirstResponder = name;
+    NSTimer *focusTimer = [NSTimer timerWithTimeInterval:0 repeats:NO block:^(__unused NSTimer *timer) {
+        [alert.window makeFirstResponder:name]; [name selectText:nil];
+    }];
+    [NSRunLoop.mainRunLoop addTimer:focusTimer forMode:NSModalPanelRunLoopMode];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return nil;
+    NSString *trimmedName = [name.stringValue stringByTrimmingCharactersInSet:
+                             NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSString *trimmedID = [petID.stringValue stringByTrimmingCharactersInSet:
+                           NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trimmedName.length == 0 || trimmedID.length == 0 ||
+        [trimmedID rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location != NSNotFound ||
+        trimmedID.integerValue <= 0) {
+        [self showError:@"名称不能为空，精灵编号必须是大于 0 的整数"]; return nil;
+    }
+    CGFloat sizeValue = [PetSizes()[size.indexOfSelectedItem] doubleValue];
+    return @{ @"name": trimmedName, @"petID": trimmedID, @"size": @(sizeValue),
+              @"freeMovement": @(movement.state == NSControlStateValueOn),
+              @"randomAttack": @(random.state == NSControlStateValueOn) };
+}
+
+- (PetView *)selectedManagedPet {
+    NSInteger row = self.managerTable.selectedRow;
+    return row >= 0 && row < (NSInteger)self.petViews.count ? self.petViews[row] : nil;
+}
+
+- (void)addManagedPet:(id)sender {
+    NSDictionary *values = [self petEditorValuesForView:nil title:@"增加桌宠"];
+    if (!values) return;
+    NSError *error = nil; NSURL *url = [self preparePetID:values[@"petID"] error:&error];
+    if (!url) { [self showError:error.localizedDescription]; return; }
+    NSMutableDictionary *record = values.mutableCopy; record[@"id"] = NSUUID.UUID.UUIDString;
+    PetView *view = [self addPetFromRecord:record resourceURL:url];
+    if (!view) { [self showError:@"无法加载这个精灵的动作帧"]; return; }
+    [self savePetInstances];
+    [self.managerTable selectRowIndexes:[NSIndexSet indexSetWithIndex:self.petViews.count - 1]
+                   byExtendingSelection:NO];
+}
+
+- (void)editManagedPet:(id)sender {
+    PetView *view = [self selectedManagedPet]; if (!view) return;
+    NSDictionary *values = [self petEditorValuesForView:view title:@"编辑桌宠"];
+    if (!values) return;
+    NSString *newPetID = values[@"petID"];
+    if (![newPetID isEqualToString:view.petID]) {
+        NSError *error = nil; NSURL *url = [self preparePetID:newPetID error:&error];
+        if (!url || ![view loadFramesFromURL:url petID:newPetID]) {
+            [self showError:error.localizedDescription ?: @"无法加载这个精灵的动作帧"]; return;
+        }
+    }
+    view.displayName = values[@"name"];
+    CGFloat newSize = [values[@"size"] doubleValue];
+    if (fabs(newSize - view.sizeMultiplier) > 0.001) {
+        NSMenuItem *item = [NSMenuItem new]; item.representedObject = @(newSize); [view changeSize:item];
+    }
+    view.freeMovementEnabled = [values[@"freeMovement"] boolValue]; [view updateMovementTimer];
+    view.randomAttackEnabled = [values[@"randomAttack"] boolValue]; [view updateRandomAttackTimer];
+    if (!view.freeMovementEnabled) [view startIdlePlayback];
+    [self savePetInstances];
+}
+
+- (void)removeManagedPet:(id)sender {
+    PetView *view = [self selectedManagedPet]; if (!view) return;
+    if (self.petViews.count <= 1) { [self showError:@"至少保留一个桌宠"]; return; }
+    NSUInteger index = [self.petViews indexOfObjectIdenticalTo:view];
+    [view.timer invalidate]; [view.movementTimer invalidate]; [view.randomAttackTimer invalidate];
+    [self.petPanels[index] orderOut:nil];
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:view.actionNamesDefaultsKey];
+    [self.petViews removeObjectAtIndex:index]; [self.petPanels removeObjectAtIndex:index];
+    self.petView = self.petViews.firstObject; self.panel = self.petPanels.firstObject;
+    [self savePetInstances];
+    NSInteger next = MIN((NSInteger)index, (NSInteger)self.petViews.count - 1);
+    [self.managerTable selectRowIndexes:[NSIndexSet indexSetWithIndex:next] byExtendingSelection:NO];
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView { return self.petViews.count; }
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)column row:(NSInteger)row {
+    PetView *view = self.petViews[row]; NSString *value = @"";
+    if ([column.identifier isEqualToString:@"name"]) value = view.displayName;
+    else if ([column.identifier isEqualToString:@"petID"]) value = view.petID;
+    else if ([column.identifier isEqualToString:@"size"]) value = [NSString stringWithFormat:@"%g×", view.sizeMultiplier];
+    else value = [NSString stringWithFormat:@"%@ / %@", view.freeMovementEnabled ? @"移动" : @"静止",
+                  view.randomAttackEnabled ? @"随机攻击" : @"不攻击"];
+    NSTextField *label = [NSTextField labelWithString:value ?: @""];
+    label.lineBreakMode = NSLineBreakByTruncatingTail; return label;
+}
+
+- (void)showPetManager:(id)sender {
+    if (!self.managerWindow) {
+        self.managerWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 330)
+            styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
+            backing:NSBackingStoreBuffered defer:NO];
+        self.managerWindow.title = @"赛尔号桌宠管理"; self.managerWindow.releasedWhenClosed = NO;
+        NSView *content = self.managerWindow.contentView;
+        NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(16, 58, 528, 256)];
+        scroll.hasVerticalScroller = YES; scroll.borderType = NSBezelBorder;
+        self.managerTable = [[NSTableView alloc] initWithFrame:scroll.bounds];
+        NSArray *columns = @[@[@"name", @"名称", @150], @[@"petID", @"编号", @70],
+                             @[@"size", @"大小", @60], @[@"state", @"状态", @220]];
+        for (NSArray *info in columns) {
+            NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:info[0]];
+            column.title = info[1]; column.width = [info[2] doubleValue]; [self.managerTable addTableColumn:column];
+        }
+        self.managerTable.dataSource = self; self.managerTable.delegate = self;
+        self.managerTable.doubleAction = @selector(editManagedPet:); self.managerTable.target = self;
+        scroll.documentView = self.managerTable; [content addSubview:scroll];
+        NSButton *add = [NSButton buttonWithTitle:@"增加" target:self action:@selector(addManagedPet:)];
+        NSButton *edit = [NSButton buttonWithTitle:@"编辑" target:self action:@selector(editManagedPet:)];
+        NSButton *remove = [NSButton buttonWithTitle:@"删除" target:self action:@selector(removeManagedPet:)];
+        add.frame = NSMakeRect(16, 16, 80, 30); edit.frame = NSMakeRect(104, 16, 80, 30);
+        remove.frame = NSMakeRect(192, 16, 80, 30);
+        [content addSubview:add]; [content addSubview:edit]; [content addSubview:remove];
+        [self.managerWindow center];
+    }
+    [self.managerTable reloadData];
+    if (self.managerTable.selectedRow < 0 && self.petViews.count > 0)
+        [self.managerTable selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+    [NSApp activateIgnoringOtherApps:YES]; [self.managerWindow makeKeyAndOrderFront:nil];
+}
+
+- (void)installStatusItem {
+    self.statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSSquareStatusItemLength];
+    NSImage *icon = NSApp.applicationIconImage.copy;
+    icon.size = NSMakeSize(18, 18);
+    self.statusItem.button.image = icon;
+    self.statusItem.button.toolTip = @"赛尔号桌宠";
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"赛尔号桌宠"];
+    NSMenuItem *manager = [menu addItemWithTitle:@"宠物管理…"
+        action:@selector(showPetManager:) keyEquivalent:@","];
+    manager.target = self;
+    [menu addItem:NSMenuItem.separatorItem];
+    NSMenuItem *quit = [menu addItemWithTitle:@"退出赛尔号桌宠"
+        action:@selector(terminate:) keyEquivalent:@"q"];
+    quit.target = NSApp;
+    self.statusItem.menu = menu;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    NSString *petID = [NSUserDefaults.standardUserDefaults stringForKey:@"petID"] ?: @"1";
-    NSURL *resourceURL = [self cachedPetURL:petID];
-    [self installIdleForPetID:petID intoPetURL:resourceURL];
-    BOOL hasCachedFrames = [NSFileManager.defaultManager
-        fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@"frames"] path]];
-    BOOL needsUpgrade = hasCachedFrames &&
-        (![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".walk-scan-v2"] path]] ||
-         ![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".raster-v3"] path]] ||
-         ![NSFileManager.defaultManager fileExistsAtPath:
-             [[[resourceURL URLByAppendingPathComponent:@"frames"] URLByAppendingPathComponent:@".layout-v1.plist"] path]]);
-    if (needsUpgrade) {
-        NSURL *upgraded = [self installPetID:petID error:nil];
-        if (upgraded) resourceURL = upgraded;
+    [self installStatusItem];
+    self.petViews = [NSMutableArray array]; self.petPanels = [NSMutableArray array];
+    for (NSDictionary *savedRecord in [self savedPetRecords]) {
+        NSMutableDictionary *record = savedRecord.mutableCopy;
+        NSString *petID = [record[@"petID"] description] ?: @"1";
+        NSURL *resourceURL = [self readyResourceForPetID:petID];
+        if (!resourceURL) resourceURL = [self installPetID:petID error:nil];
+        if (!resourceURL) { record[@"petID"] = @"1"; resourceURL = NSBundle.mainBundle.resourceURL; }
+        [self addPetFromRecord:record resourceURL:resourceURL];
     }
-    if (![[NSFileManager defaultManager] fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@"frames"] path]]) {
-        petID = @"1"; resourceURL = NSBundle.mainBundle.resourceURL;
-    }
-    NSSize size = NSMakeSize(BaseWindowSize, BaseWindowSize);
-    self.petView = [[PetView alloc] initWithFrame:NSMakeRect(0, 0, size.width, size.height)
-                                      resourceURL:resourceURL petID:petID];
-    if (!self.petView && ![resourceURL isEqual:NSBundle.mainBundle.resourceURL]) {
-        petID = @"1"; resourceURL = NSBundle.mainBundle.resourceURL;
-        self.petView = [[PetView alloc] initWithFrame:NSMakeRect(0, 0, size.width, size.height)
-                                          resourceURL:resourceURL petID:petID];
-    }
-    if (!self.petView) { [NSApp terminate:nil]; return; }
-    CGFloat side = BaseWindowSize * self.petView.sizeMultiplier;
-    size = NSMakeSize(side, side);
-    [self.petView setFrameSize:size];
-    self.panel = [[PetPanel alloc] initWithContentRect:NSMakeRect(0, 0, size.width, size.height)
-                                             styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
-    self.panel.opaque = NO; self.panel.backgroundColor = NSColor.clearColor; self.panel.hasShadow = NO;
-    self.panel.level = NSFloatingWindowLevel;
-    self.panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary;
-    self.panel.hidesOnDeactivate = NO; self.panel.contentView = self.petView;
+    if (self.petViews.count == 0) { [NSApp terminate:nil]; return; }
+    self.petView = self.petViews.firstObject; self.panel = self.petPanels.firstObject;
     NSPoint mouse = NSEvent.mouseLocation; NSScreen *screen = NSScreen.mainScreen;
     for (NSScreen *candidate in NSScreen.screens) if (NSPointInRect(mouse, candidate.frame)) { screen = candidate; break; }
-    NSRect visible = screen.visibleFrame;
-    [self.panel setFrameOrigin:NSMakePoint(NSMidX(visible) - size.width / 2.0, NSMidY(visible) - size.height / 2.0)];
     [NSApp activateIgnoringOtherApps:YES]; [self.panel makeKeyAndOrderFront:nil];
+
+    if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_STATUS_ITEM"]) {
+        BOOL valid = NSApp.activationPolicy == NSApplicationActivationPolicyAccessory &&
+            self.statusItem.button.image && self.statusItem.menu.numberOfItems == 3;
+        exit(valid ? 0 : 14);
+    }
 
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_MODAL_CALLBACK"]) {
         NSAlert *alert = [NSAlert new];
@@ -1373,6 +1648,29 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_INPUT"]) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self changePet:NSMenuItem.new]; });
         return;
+    }
+    if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_MULTI"]) {
+        NSArray *oldRecords = [NSUserDefaults.standardUserDefaults arrayForKey:PetInstancesKey];
+        NSUInteger before = self.petViews.count;
+        NSDictionary *record = @{ @"id": @"__multi_test", @"name": @"第二只",
+                                  @"petID": self.petView.petID, @"size": @0.5,
+                                  @"freeMovement": @NO, @"randomAttack": @YES };
+        PetView *second = [self addPetFromRecord:record
+                                     resourceURL:[self readyResourceForPetID:self.petView.petID]];
+        [self savePetInstances];
+        NSArray *saved = [NSUserDefaults.standardUserDefaults arrayForKey:PetInstancesKey];
+        [self showPetManager:nil];
+        BOOL independent = second && self.petViews.count == before + 1 &&
+            ![second.instanceID isEqualToString:self.petView.instanceID] &&
+            ![second.displayName isEqualToString:self.petView.displayName] &&
+            second.sizeMultiplier == 0.5 && !second.freeMovementEnabled && second.randomAttackEnabled &&
+            self.managerTable.numberOfRows == (NSInteger)self.petViews.count &&
+            saved.count == self.petViews.count &&
+            ![second.actionNamesDefaultsKey isEqualToString:self.petView.actionNamesDefaultsKey];
+        [second.window orderOut:nil];
+        [self.petPanels removeLastObject]; [self.petViews removeLastObject];
+        [NSUserDefaults.standardUserDefaults setObject:oldRecords forKey:PetInstancesKey];
+        exit(independent ? 0 : 13);
     }
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_UNCONSTRAINED"]) {
         NSPoint target = NSMakePoint(NSMinX(screen.frame), NSMaxY(screen.frame) + 100.0);
@@ -1412,18 +1710,17 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         [self.petView.timer invalidate]; [self.petView restoreIdleWindow]; [self.petView startIdlePlayback];
 
         NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-        id oldA = [defaults objectForKey:@"actionNames.__testA"];
-        id oldB = [defaults objectForKey:@"actionNames.__testB"];
-        NSString *originalPetID = self.petView.petID;
-        [defaults setObject:@{@"attack": @"测试动作"} forKey:@"actionNames.__testA"];
-        [defaults removeObjectForKey:@"actionNames.__testB"];
-        self.petView.petID = @"__testA"; BOOL customized = [[self.petView actionNameForKey:@"attack"] isEqualToString:@"测试动作"];
+        NSString *keyA = @"actionNames.instance.__testA", *keyB = @"actionNames.instance.__testB";
+        id oldA = [defaults objectForKey:keyA], oldB = [defaults objectForKey:keyB];
+        NSString *originalInstanceID = self.petView.instanceID;
+        [defaults setObject:@{@"attack": @"测试动作"} forKey:keyA]; [defaults removeObjectForKey:keyB];
+        self.petView.instanceID = @"__testA"; BOOL customized = [[self.petView actionNameForKey:@"attack"] isEqualToString:@"测试动作"];
         [self.petView resetActionNames:nil];
         BOOL reset = [[self.petView actionNameForKey:@"attack"] isEqualToString:DefaultActionNames()[@"attack"]];
-        self.petView.petID = @"__testB"; BOOL isolated = ![[self.petView actionNameForKey:@"attack"] isEqualToString:@"测试动作"];
-        self.petView.petID = originalPetID;
-        if (oldA) [defaults setObject:oldA forKey:@"actionNames.__testA"]; else [defaults removeObjectForKey:@"actionNames.__testA"];
-        if (oldB) [defaults setObject:oldB forKey:@"actionNames.__testB"]; else [defaults removeObjectForKey:@"actionNames.__testB"];
+        self.petView.instanceID = @"__testB"; BOOL isolated = ![[self.petView actionNameForKey:@"attack"] isEqualToString:@"测试动作"];
+        self.petView.instanceID = originalInstanceID;
+        if (oldA) [defaults setObject:oldA forKey:keyA]; else [defaults removeObjectForKey:keyA];
+        if (oldB) [defaults setObject:oldB forKey:keyB]; else [defaults removeObjectForKey:keyB];
         exit(movedLeft && usedLeftWalk && stoppedLeft && bounced && usedRightWalk && sameWalkScale && mirrored &&
              mirroredActionAligned && customized && reset && isolated ? 0 : 9);
     }
@@ -1514,13 +1811,25 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         });
     }
 }
+
+- (void)applicationWillTerminate:(NSNotification *)notification {
+    [self savePetInstances];
+}
 @end
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         NSApplication *application = NSApplication.sharedApplication;
         AppDelegate *delegate = [AppDelegate new]; application.delegate = delegate;
-        [application setActivationPolicy:NSApplicationActivationPolicyRegular]; [application run];
+        NSMenu *mainMenu = [NSMenu new]; NSMenuItem *appItem = [NSMenuItem new];
+        [mainMenu addItem:appItem]; NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"赛尔号桌宠"];
+        NSMenuItem *manager = [appMenu addItemWithTitle:@"宠物管理…"
+            action:@selector(showPetManager:) keyEquivalent:@","];
+        manager.target = delegate; [appMenu addItem:NSMenuItem.separatorItem];
+        NSMenuItem *quit = [appMenu addItemWithTitle:@"退出赛尔号桌宠"
+            action:@selector(terminate:) keyEquivalent:@"q"];
+        quit.target = application; appItem.submenu = appMenu; application.mainMenu = mainMenu;
+        [application setActivationPolicy:NSApplicationActivationPolicyAccessory]; [application run];
     }
     return 0;
 }

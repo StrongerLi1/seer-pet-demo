@@ -15,6 +15,8 @@ walk_width=$(sips -g pixelWidth frames/walk-left/*.png 2>/dev/null | awk '/pixel
 (( walk_width >= 150 ))
 [[ -x SeerPetDemo.app/Contents/MacOS/SeerPetDemo ]]
 [[ -x SeerPetDemo.app/Contents/Resources/runtime/bin/java ]]
+[[ "$(plutil -extract LSUIElement raw Info.plist)" == "true" ]]
+SEER_PET_TEST_STATUS_ITEM=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 SEER_PET_TEST_LAYOUT=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 SEER_PET_TEST_SCALE=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 SEER_PET_TEST_MOUSE=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
@@ -23,6 +25,7 @@ SEER_PET_TEST_MOVEMENT=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 SEER_PET_TEST_RANDOM_ATTACK=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 SEER_PET_TEST_INPUT=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 SEER_PET_TEST_MODAL_CALLBACK=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
+SEER_PET_TEST_MULTI=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 SEER_PET_TEST_PET_ID=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 for action in attack sa cp hited; do
   SEER_PET_TEST_ACTION="$action" ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
