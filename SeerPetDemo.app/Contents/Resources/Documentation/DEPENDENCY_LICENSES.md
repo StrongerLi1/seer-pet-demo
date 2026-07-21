@@ -6,3 +6,4 @@
 - 应用包内置 JPEXS Free Flash Decompiler（FFDec），按 GNU GPL v3 发布。许可证位于 `SeerPetDemo.app/Contents/Resources/ffdec/license.txt`，对应上游项目为 https://github.com/jindrapetrik/jpexs-decompiler 。
 - 应用包内置 OpenJDK 25 精简运行时。许可证和第三方组件声明位于 `SeerPetDemo.app/Contents/Resources/runtime/legal/`。
 - 本仓库没有为自有代码声明开源许可证；未经另行许可，默认保留权利。
+

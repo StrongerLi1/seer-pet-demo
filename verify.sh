@@ -79,6 +79,9 @@ SEER_PET_TEST_MODAL_CALLBACK=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 SEER_PET_TEST_MULTI=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 [[ -s /tmp/seer-manager-render.png ]]
 SEER_PET_TEST_PET_ID=1 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
+SEER_PET_TEST_PET_ID=9 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
+SEER_PET_TEST_PET_ID=70 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
+SEER_PET_TEST_PET_ID=300 ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 for action in attack sa cp hited; do
   SEER_PET_TEST_ACTION="$action" ./SeerPetDemo.app/Contents/MacOS/SeerPetDemo
 done

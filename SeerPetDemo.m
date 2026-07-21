@@ -1113,6 +1113,72 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     return [[[self supportURL] URLByAppendingPathComponent:@"pets"] URLByAppendingPathComponent:petID];
 }
 
+- (unsigned long long)allocatedSizeAtURL:(NSURL *)url {
+    unsigned long long size = 0;
+    NSDirectoryEnumerator<NSURL *> *files = [NSFileManager.defaultManager
+        enumeratorAtURL:url includingPropertiesForKeys:@[NSURLFileAllocatedSizeKey, NSURLFileSizeKey]
+        options:0 errorHandler:nil];
+    for (NSURL *file in files) {
+        NSNumber *allocatedSize, *fileSize;
+        [file getResourceValue:&allocatedSize forKey:NSURLFileAllocatedSizeKey error:nil];
+        [file getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
+        size += (allocatedSize ?: fileSize).unsignedLongLongValue;
+    }
+    return size;
+}
+
+- (NSArray<NSURL *> *)unusedCachedPetURLs {
+    NSMutableSet<NSString *> *activePetIDs = [NSMutableSet set];
+    for (PetView *view in self.petViews) [activePetIDs addObject:NormalizedPetID(view.petID)];
+    NSURL *cacheURL = [[self supportURL] URLByAppendingPathComponent:@"pets"];
+    NSArray<NSURL *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtURL:cacheURL
+        includingPropertiesForKeys:@[NSURLIsDirectoryKey] options:0 error:nil] ?: @[];
+    NSMutableArray<NSURL *> *unused = [NSMutableArray array];
+    for (NSURL *entry in entries) {
+        NSNumber *isDirectory;
+        [entry getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+        NSString *petID = NormalizedPetID(entry.lastPathComponent);
+        if (isDirectory.boolValue && petID.integerValue > 0 &&
+            ![activePetIDs containsObject:petID])
+            [unused addObject:entry];
+    }
+    return unused;
+}
+
+- (void)showCachePanel:(id)sender {
+    NSURL *cacheURL = [[self supportURL] URLByAppendingPathComponent:@"pets"];
+    unsigned long long totalSize = [self allocatedSizeAtURL:cacheURL];
+    NSArray<NSURL *> *unused = [self unusedCachedPetURLs];
+    unsigned long long unusedSize = 0;
+    for (NSURL *url in unused) unusedSize += [self allocatedSizeAtURL:url];
+
+    NSView *details = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 58)];
+    NSTextField *path = [NSTextField labelWithString:cacheURL.path];
+    path.frame = NSMakeRect(0, 32, 460, 22); path.selectable = YES;
+    path.lineBreakMode = NSLineBreakByTruncatingMiddle; path.toolTip = cacheURL.path;
+    NSTextField *size = [NSTextField labelWithString:[NSString stringWithFormat:@"占用空间：%@（可清理 %@）",
+        [NSByteCountFormatter stringFromByteCount:totalSize countStyle:NSByteCountFormatterCountStyleFile],
+        [NSByteCountFormatter stringFromByteCount:unusedSize countStyle:NSByteCountFormatterCountStyleFile]]];
+    size.frame = NSMakeRect(0, 4, 460, 22); [details addSubview:path]; [details addSubview:size];
+
+    NSAlert *alert = [NSAlert new]; alert.messageText = @"清理缓存";
+    alert.informativeText = [NSString stringWithFormat:@"缓存路径（%lu 个未创建精灵缓存）：", (unsigned long)unused.count];
+    alert.accessoryView = details;
+    [alert addButtonWithTitle:@"清理未创建精灵缓存"]; [alert addButtonWithTitle:@"关闭"];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSUInteger removed = 0; unsigned long long freed = 0;
+    for (NSURL *url in unused) {
+        unsigned long long itemSize = [self allocatedSizeAtURL:url];
+        if ([NSFileManager.defaultManager removeItemAtURL:url error:nil]) { removed++; freed += itemSize; }
+    }
+    NSAlert *result = [NSAlert new]; result.messageText = @"缓存已清理";
+    result.informativeText = removed ? [NSString stringWithFormat:@"已清理 %lu 个未创建精灵缓存，释放 %@。",
+        (unsigned long)removed, [NSByteCountFormatter stringFromByteCount:freed countStyle:NSByteCountFormatterCountStyleFile]] :
+        @"没有可清理的未创建精灵缓存。";
+    [result runModal];
+}
+
 - (NSArray<NSDictionary *> *)savedPetRecords {
     NSArray *saved = [NSUserDefaults.standardUserDefaults arrayForKey:PetInstancesKey];
     if (saved.count > 0) return saved;
@@ -1155,8 +1221,17 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     [self installIdleForPetID:petID intoPetURL:resourceURL];
     BOOL hasFrames = [NSFileManager.defaultManager
         fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@"frames"] path]];
+    BOOL needsPetException = ([petID isEqualToString:@"9"] || [petID isEqualToString:@"70"]) &&
+        ![NSFileManager.defaultManager fileExistsAtPath:
+            [[resourceURL URLByAppendingPathComponent:@".pet-exceptions-v1"] path]];
+    BOOL needsPet70Idle = [petID isEqualToString:@"70"] &&
+        ![NSFileManager.defaultManager fileExistsAtPath:
+            [[[[resourceURL URLByAppendingPathComponent:@"frames"] URLByAppendingPathComponent:@"idle"]
+                URLByAppendingPathComponent:@".true-idle"] path]];
     BOOL needsUpgrade = hasFrames &&
-        (![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".walk-scan-v2"] path]] ||
+        (needsPetException || needsPet70Idle ||
+         ![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".idle-scan-v1"] path]] ||
+         ![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".walk-scan-v2"] path]] ||
          ![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".bag-front-v1"] path]] ||
          ![NSFileManager.defaultManager fileExistsAtPath:[[resourceURL URLByAppendingPathComponent:@".raster-v3"] path]] ||
          ![NSFileManager.defaultManager fileExistsAtPath:
@@ -1480,9 +1555,16 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     NSURL *walkScanMarker = [cached URLByAppendingPathComponent:@".walk-scan-v2"];
     NSURL *bagFrontMarker = [cached URLByAppendingPathComponent:@".bag-front-v1"];
     NSURL *rasterMarker = [cached URLByAppendingPathComponent:@".raster-v3"];
+    BOOL hasPetException = ![petID isEqualToString:@"9"] && ![petID isEqualToString:@"70"] ||
+        [NSFileManager.defaultManager fileExistsAtPath:
+            [[cached URLByAppendingPathComponent:@".pet-exceptions-v1"] path]];
+    BOOL hasPet70Idle = ![petID isEqualToString:@"70"] ||
+        [NSFileManager.defaultManager fileExistsAtPath:
+            [[[[cached URLByAppendingPathComponent:@"frames"] URLByAppendingPathComponent:@"idle"]
+                URLByAppendingPathComponent:@".true-idle"] path]];
     if ([[NSFileManager defaultManager] fileExistsAtPath:[[cached URLByAppendingPathComponent:@"frames"] path]] &&
         [[NSFileManager defaultManager] fileExistsAtPath:idleScanMarker.path] &&
-        [[NSFileManager defaultManager] fileExistsAtPath:walkScanMarker.path]) {
+        [[NSFileManager defaultManager] fileExistsAtPath:walkScanMarker.path] && hasPetException && hasPet70Idle) {
         if ([NSFileManager.defaultManager
              fileExistsAtPath:[[cached URLByAppendingPathComponent:@".raster-v1"] path]] ||
             [NSFileManager.defaultManager
@@ -1562,6 +1644,10 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         SetError(error, @"这个 SWF 不是兼容的四动作精灵格式"); [fm removeItemAtURL:temp error:nil]; return nil;
     }
     ids = [[ids subarrayWithRange:NSMakeRange(ids.count - 4, 4)] mutableCopy];
+    NSArray<NSNumber *> *idleActionIDs = [ids subarrayWithRange:NSMakeRange(0, 3)];
+    // 70 has an extra attack1 before the normal four actions; ignore it and restore attack/sa/cp/hited order.
+    if ([petID isEqualToString:@"70"])
+        ids = [@[ids[3], ids[0], ids[1], ids[2]] mutableCopy];
     NSMutableArray<NSString *> *idStrings = [NSMutableArray array];
     for (NSNumber *value in ids) [idStrings addObject:value.stringValue];
 
@@ -1570,7 +1656,10 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     NSArray<NSNumber *> *frameCounts = @[];
     [self reportConversionProgress:18 status:@"分析待机与动作结构…"];
     if ([self runFFDec:@[@"-swf2xml", swf.path, xml.path]]) {
-        idleInfo = [self idleInfoFromXMLURL:xml actionIDs:[ids subarrayWithRange:NSMakeRange(0, 3)]];
+        idleInfo = [self idleInfoFromXMLURL:xml actionIDs:idleActionIDs];
+        // 9's highest shared child is a two-frame tail effect; sprite 19 is its complete body loop.
+        if ([petID isEqualToString:@"9"])
+            idleInfo = @{@"spriteID": @19, @"fps": idleInfo[@"fps"] ?: @25};
         frameCounts = [self frameCountsFromXMLURL:xml actionIDs:ids];
     }
     NSMutableArray<NSString *> *exportIDStrings = idStrings.mutableCopy;
@@ -1656,6 +1745,8 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
     [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".walk-scan-v2"] atomically:YES];
     if (hasBagFront) [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".bag-front-v1"] atomically:YES];
     [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".raster-v3"] atomically:YES];
+    if ([petID isEqualToString:@"9"] || [petID isEqualToString:@"70"])
+        [NSData.data writeToURL:[stagedPet URLByAppendingPathComponent:@".pet-exceptions-v1"] atomically:YES];
     [fm createDirectoryAtURL:cached.URLByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
     [fm removeItemAtURL:cached error:nil];
     if (![fm moveItemAtURL:stagedPet toURL:cached error:error]) { [fm removeItemAtURL:temp error:nil]; return nil; }
@@ -2195,12 +2286,12 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         [close setUpImage:PetBagInfoImage(@"close-up") overImage:PetBagInfoImage(@"close-over")];
         close.toolTip = @"关闭"; [content addSubview:close];
         NSArray<NSString *> *tips = @[@"身边跟随", @"设为首选", @"更换技能", @"随机攻击开关",
-            @"增加桌宠", @"删除桌宠", @"编辑桌宠", @"精灵恢复并居中"];
+            @"增加桌宠", @"删除桌宠", @"编辑桌宠", @"清理缓存"];
         NSArray<NSString *> *actions = @[NSStringFromSelector(@selector(toggleManagedPetVisibility:)),
             NSStringFromSelector(@selector(makeManagedPetPrimary:)), NSStringFromSelector(@selector(replaceManagedPetSkills:)),
             NSStringFromSelector(@selector(toggleManagedPetRandomAttack:)), NSStringFromSelector(@selector(addManagedPet:)),
             NSStringFromSelector(@selector(removeManagedPet:)), NSStringFromSelector(@selector(editManagedPet:)),
-            NSStringFromSelector(@selector(restoreManagedPet:))];
+            NSStringFromSelector(@selector(showCachePanel:))];
         NSArray<NSString *> *names = @[@"follow-show", @"default", @"countermark", @"skill-stone",
             @"pet-storage", @"storage", @"item", @"cure"];
         NSArray<NSValue *> *frames = @[
@@ -2489,8 +2580,18 @@ static BOOL NormalizeFramesAtURL(NSURL *framesURL, NSDictionary<NSString *, NSNu
         BOOL bagTrimmed = bagBounds && NSEqualSizes(self.petView.bagImage.size, bagBounds.rectValue.size);
         BOOL movementLoaded = ![testPetID isEqualToString:@"1"] ||
             (self.petView.walkLeftFrames.count > 1 && self.petView.walkRightFrames.count > 1);
+        BOOL pet9Valid = ![testPetID isEqualToString:@"9"] ||
+            (self.petView.idleFrames.count == 16 && self.petView.idleImage.size.height >= 400);
+        BOOL pet70Valid = ![testPetID isEqualToString:@"70"] ||
+            (self.petView.idleFrames.count == 17 &&
+             self.petView.actionFrames[@"attack"].count == 75 && self.petView.actionFrames[@"sa"].count == 75 &&
+             self.petView.actionFrames[@"cp"].count == 74 && self.petView.actionFrames[@"hited"].count == 8);
+        BOOL pet300Valid = ![testPetID isEqualToString:@"300"] ||
+            (self.petView.idleFrames.count == 32 && self.petView.idleImage.size.width >= 700 &&
+             self.petView.idleImage.size.height >= 400);
         exit(loaded && bagTrimmed && movementLoaded &&
-             (![testPetID isEqualToString:@"1"] || self.petView.idleFrames.count > 1) ? 0 : 4);
+             (![testPetID isEqualToString:@"1"] || self.petView.idleFrames.count > 1) &&
+             pet9Valid && pet70Valid && pet300Valid ? 0 : 4);
     }
     if (NSProcessInfo.processInfo.environment[@"SEER_PET_TEST_SCALE"]) {
         NSSize idleSize = self.panel.frame.size;
